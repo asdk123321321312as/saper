@@ -1,9 +1,11 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v2.1
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v2.2
       ------------------------------------------------------------------
       Меню     : Home   (меняется в «Настройках»)
       Мины     : точные мины/безопасные (логика + подмножества),
                  тепловая карта риска по ВСЕЙ доске,
+                 регулируемая прозрачность подсветки,
+                 открытые клетки не закрашиваются,
                  авто-флаги, rage-вскрытие карты
       Визуалы  : FOV, Fullbright, 6 пресетов неба, скины на флаг
       Игра     : roblox.com/games/7871169780
@@ -25,7 +27,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "2.1" }
+local VMS = { version = "2.2" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -46,6 +48,7 @@ local CFG = {
     autoFlag   = false,
     autoReveal = false,
     density    = 0.16,
+    paintTrans = 0.35,     -- прозрачность подсветки (0 = сплошная заливка)
     fov        = 70,
     fullbright = false,
     sky        = "Default",
@@ -88,14 +91,15 @@ local function stroke(o, c, th, tr)
     return new("UIStroke", { Color = c, Thickness = th or 1, Transparency = tr or 0.4,
                              ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, o)
 end
-local function colorClose(a, b)
-    return math.abs(a.R - b.R) < 0.03 and math.abs(a.G - b.G) < 0.03 and math.abs(a.B - b.B) < 0.03
+local function colorClose(a, b, tol)
+    tol = tol or 0.03
+    return math.abs(a.R - b.R) < tol and math.abs(a.G - b.G) < tol and math.abs(a.B - b.B) < tol
 end
 
 --====================== 3. ЛОГИКА ДОСКИ ==============================
 local Board = {
     folder = nil, cells = {}, covered = {}, numbers = {},
-    w = 0, h = 0, lastCount = -1, truthMode = "логика",
+    w = 0, h = 0, lastCount = -1, truthMode = "логика", coverColor = nil,
 }
 
 local PAINTS = {
@@ -166,12 +170,67 @@ local function nearest(list, v)
     return best
 end
 
+-- (объявлено ДО buildGrid — buildGrid их использует)
+local function numberAt(part)
+    local gui = part:FindFirstChild("NumberGui")
+    local lbl = gui and gui:FindFirstChild("TextLabel")
+    return lbl and tonumber(lbl.Text) or nil
+end
+
+local function probeTruth(part)
+    for k, v in pairs(part:GetAttributes()) do
+        local lk = string.lower(k)
+        if type(v) == "boolean" then
+            if lk:find("mine") or lk:find("bomb") then return v and "mine" or "safe" end
+            if lk:find("safe") then return v and "safe" or "mine" end
+        end
+    end
+    for _, ch in ipairs(part:GetChildren()) do
+        if ch:IsA("BoolValue") then
+            local n = string.lower(ch.Name)
+            if n:find("mine") or n:find("bomb") then return ch.Value and "mine" or "safe" end
+            if n:find("safe") then return ch.Value and "safe" or "mine" end
+        end
+    end
+    return nil
+end
+
+local function isGreen(col)
+    return col.G > col.R + 0.03 and col.G > col.B + 0.03 and col.G > 0.18
+end
+
+-- закрытая клетка = зелёная ИЛИ совпадает с авто-определённым цветом закрытых
+local function isCoveredColor(col)
+    if isGreen(col) then return true end
+    local cc = Board.coverColor
+    if cc and colorClose(col, cc, 0.09) then return true end
+    return false
+end
+
 local function buildGrid(folder)
     local parts = {}
     for _, ch in ipairs(folder:GetChildren()) do
         if ch:IsA("BasePart") then parts[#parts + 1] = ch end
     end
     if #parts < 4 then Board.cells, Board.w, Board.h = {}, 0, 0; return end
+
+    -- авто-определение цвета закрытой клетки (самый частый цвет среди неоткрытых)
+    do
+        local counts, sample = {}, {}
+        for i = 1, #parts do
+            local p = parts[i]
+            if not numberAt(p) and not p:FindFirstChildOfClass("Model") then
+                local key = ("%d_%d_%d"):format(math.floor(p.Color.R * 8), math.floor(p.Color.G * 8), math.floor(p.Color.B * 8))
+                counts[key] = (counts[key] or 0) + 1
+                sample[key] = p.Color
+            end
+        end
+        local bk, bn
+        for k, n in pairs(counts) do
+            if not bn or n > bn then bk, bn = k, n end
+        end
+        Board.coverColor = bk and sample[bk] or nil
+    end
 
     local xs, zs, sumY = {}, {}, 0
     for i = 1, #parts do
@@ -223,56 +282,35 @@ local function buildGrid(folder)
     Board.covered, Board.numbers = {}, {}
 end
 
-local function probeTruth(part)
-    for k, v in pairs(part:GetAttributes()) do
-        local lk = string.lower(k)
-        if type(v) == "boolean" then
-            if lk:find("mine") or lk:find("bomb") then return v and "mine" or "safe" end
-            if lk:find("safe") then return v and "safe" or "mine" end
-        end
-    end
-    for _, ch in ipairs(part:GetChildren()) do
-        if ch:IsA("BoolValue") then
-            local n = string.lower(ch.Name)
-            if n:find("mine") or n:find("bomb") then return ch.Value and "mine" or "safe" end
-            if n:find("safe") then return ch.Value and "safe" or "mine" end
-        end
-    end
-    return nil
-end
-
-local function numberAt(part)
-    local gui = part:FindFirstChild("NumberGui")
-    local lbl = gui and gui:FindFirstChild("TextLabel")
-    return lbl and tonumber(lbl.Text) or nil
-end
-
-local function isGreen(col)
-    return col.G > col.R + 0.03 and col.G > col.B + 0.03 and col.G > 0.18
-end
-local function isGray(col)
-    return math.abs(col.R - col.G) < 0.09 and math.abs(col.G - col.B) < 0.09
-end
-
 local function setPaint(cell, kind)
     local part = cell.part
     if not part or not part.Parent then return end
-    if kind == cell.painted then return end
+
+    -- уже так покрашено: синхронизируем только прозрачность (живой слайдер)
+    if kind == cell.painted then
+        if kind and math.abs(part.Transparency - CFG.paintTrans) > 0.001 then
+            part.Transparency = CFG.paintTrans
+        end
+        return
+    end
 
     if kind == nil then
         if cell.painted then
             if cell.origColor then part.Color = cell.origColor end
             if cell.origMaterial then part.Material = cell.origMaterial end
-            cell.painted, cell.applied, cell.origColor, cell.origMaterial = nil, nil, nil, nil
+            if cell.origTrans ~= nil then part.Transparency = cell.origTrans end
+            cell.painted, cell.applied = nil, nil
+            cell.origColor, cell.origMaterial, cell.origTrans = nil, nil, nil
         end
         return
     end
 
     if not cell.origColor then
-        cell.origColor, cell.origMaterial = part.Color, part.Material
+        cell.origColor, cell.origMaterial, cell.origTrans = part.Color, part.Material, part.Transparency
     end
     part.Color = PAINTS[kind] or PAINTS.gsafe
     part.Material = Enum.Material.Neon
+    part.Transparency = CFG.paintTrans
     cell.painted, cell.applied = kind, part.Color
 end
 
@@ -287,8 +325,12 @@ local function refresh()
         local c = cells[i]
         local part = c.part
         if part and part.Parent then
+            -- игра перекрасила клетку => она открылась, снимаем подсветку и возвращаем вид
             if c.painted and c.applied and not colorClose(part.Color, c.applied) then
-                c.painted, c.applied, c.origColor, c.origMaterial = nil, nil, nil, nil
+                if c.origMaterial then part.Material = c.origMaterial end
+                if c.origTrans ~= nil then part.Transparency = c.origTrans end
+                c.painted, c.applied = nil, nil
+                c.origColor, c.origMaterial, c.origTrans = nil, nil, nil
             end
 
             c.truth = probeTruth(part)
@@ -302,14 +344,14 @@ local function refresh()
                 c.number = nil
                 if part:FindFirstChildOfClass("Model") then
                     c.state = "flagged"
-                elseif c.painted or c.truth == "mine" then
+                elseif c.painted then
+                    c.state = "unknown"                 -- стоит наша краска => ещё закрыта
+                elseif isCoveredColor(part.Color) then
                     c.state = "unknown"
-                elseif isGreen(part.Color) then
+                elseif c.truth == "mine" then
                     c.state = "unknown"
-                elseif isGray(part.Color) then
-                    c.state = "blank"
                 else
-                    c.state = "unknown"
+                    c.state = "blank"                   -- открытая пустая клетка
                 end
                 if c.state == "unknown" or c.state == "flagged" then
                     Board.covered[#Board.covered + 1] = c
@@ -825,7 +867,6 @@ local function switchTab(name)
     end
 end
 
--- ВАЖНО: возвращаем СТРАНИЦУ (а не кнопку) — иначе элементы уезжают в сайдбар
 local function makeTab(name, label, order)
     local b = new("TextButton", {
         Name = name, Size = UDim2.new(1, -12, 0, 38), Position = UDim2.new(0, 12, 0, 12 + (order - 1) * 44),
@@ -846,7 +887,6 @@ local function makeTab(name, label, order)
     return makePage(name)
 end
 
--- --- элементы (жёсткая раскладка) ---
 local function item(page, h, gap, transparent)
     local y = cursors[page] or 0
     cursors[page] = y + h + (gap or 6)
@@ -1125,7 +1165,6 @@ local function addKeybind(page, text, key, cb)
     return f
 end
 
--- тосты (объявляем notify заранее — его дергает кнопка RAGE ниже)
 local toastHolder = new("Frame", {
     Size = UDim2.new(0, 260, 0, 420), Position = UDim2.new(1, -18, 1, -18),
     AnchorPoint = Vector2.new(1, 1), BackgroundTransparency = 1,
@@ -1165,6 +1204,7 @@ addToggle(tabMines, "Показывать мины и риск", "showMines", fu
     if not v then clearAllPaint() end
 end)
 addToggle(tabMines, "Тепловая карта по всей доске", "heatmap")
+addSlider(tabMines, "Прозрачность подсветки", "paintTrans", 0, 0.9, 2)
 addToggle(tabMines, "Auto Flag (ставить флаги)", "autoFlag")
 addToggle(tabMines, "Auto Reveal (вскрывать безопасные)", "autoReveal")
 addButton(tabMines, "RAGE: вскрыть всю карту", function()
@@ -1173,7 +1213,7 @@ addButton(tabMines, "RAGE: вскрыть всю карту", function()
     notify("Rage-режим: карта вскрывается полностью")
 end, THEME.accent)
 addButton(tabMines, "Сбросить подсветку", clearAllPaint)
-addNote(tabMines, "Красный — мина (точно).  Зелёный — безопасно (точно).  Оранжевый — скорее мина.  Синий — скорее безопасно.  Голубой — лучший ход. Тепловая карта красит ВСЮ закрытую часть доски, а не только решённую логикой.", 58)
+addNote(tabMines, "Красный — мина (точно).  Зелёный — безопасно (точно).  Оранжевый — скорее мина.  Синий — скорее безопасно.  Голубой — лучший ход.  Прозрачность регулируется слайдером; уже открытые клетки не закрашиваются.", 58)
 
 addSection(tabVisual, "КАМЕРА")
 addSlider(tabVisual, "FOV (поле зрения)", "fov", 50, 130, 0, applyFOV)
@@ -1204,6 +1244,7 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     local folder = Board.folder
     print("===== VENICE HUB DEBUG =====")
     print("Доска:", folder and folder:GetFullName() or "НЕ НАЙДЕНА")
+    print("Цвет закрытой клетки (авто):", tostring(Board.coverColor))
     if folder then
         local kids = folder:GetChildren()
         print("Клеток:", #kids, "| сетка:", Board.w .. "x" .. Board.h)
@@ -1227,7 +1268,7 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     print("===== END DEBUG =====")
 end)
 addButton(tabDebug, "Пересобрать доску", function() Board.lastCount = -1 end)
-addNote(tabDebug, "Если в дампе у клеток есть атрибуты/значения про мины — скрипт использует их как истину (режим «атрибуты» в статусе). Иначе работает логика + тепловая карта.", 52)
+addNote(tabDebug, "Дамп покажет, есть ли у клеток атрибуты/значения про мины — тогда режим в статусе станет «атрибуты» и мины будут точными сразу.", 40)
 
 switchTab("Mines")
 
@@ -1355,5 +1396,5 @@ end
 
 --====================== 10. СТАРТ ====================================
 applyFOV()
-notify("Venice Hub 2.1 · Home = меню")
-print("[Venice Hub 2.1] загружен. Home — меню, вкладка ДЕБАГ — дамп структуры.")
+notify("Venice Hub 2.2 · Home = меню")
+print("[Venice Hub 2.2] загружен. Home — меню.")
