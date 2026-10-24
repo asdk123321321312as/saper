@@ -1,11 +1,10 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.0
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.1
       ------------------------------------------------------------------
       Меню     : Home   (меняется в «Настройках»)
       Мины     : метка-точка в центре клетки:
                    КРАСНАЯ = мина, СИНЯЯ = безопасно
                    точные — плотные, догадки — полупрозрачные
-                 размер/высота/прозрачность регулируются
       Визуалы  : FOV, Fullbright, 6 пресетов неба, скины на флаг
       Игра     : roblox.com/games/7871169780
 =======================================================================]]
@@ -26,7 +25,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "3.0" }
+local VMS = { version = "3.1" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -43,11 +42,11 @@ end
 --====================== 1. НАСТРОЙКИ =================================
 local CFG = {
     showMines    = true,
-    markers      = true,     -- точки в центре клеток
-    markerGuess  = true,     -- помечать и догадки (полупрозрачно)
-    markerBest   = true,     -- метка лучшего хода (голубая)
-    paintTiles   = false,    -- дополнительно красить клетки
-    heatmap      = true,     -- считать риск для всех закрытых клеток
+    markers      = true,
+    markerGuess  = true,
+    markerBest   = true,
+    paintTiles   = false,
+    heatmap      = true,
     markerSize   = 0.9,
     markerTrans  = 0.1,
     markerHeight = 1.8,
@@ -104,7 +103,7 @@ end
 --====================== 3. ЛОГИКА ДОСКИ ==============================
 local Board = {
     folder = nil, cells = {}, covered = {}, numbers = {},
-    w = 0, h = 0, lastCount = -1, truthMode = "логика", coverColor = nil,
+    w = 0, h = 0, lastCount = -1, truthMode = "логика", coverColor = nil, sp = 5,
 }
 
 local PAINTS = {
@@ -289,10 +288,28 @@ local function buildGrid(folder)
     end
 
     Board.grid, Board.w, Board.h, Board.cells = grid, w, h, cells
-    Board.covered, Board.numbers = {}, {}
+    Board.covered, Board.numbers, Board.sp = {}, {}, sp
 end
 
---=== МЕТКИ (точки в центре клетки) ===================================
+-- проверка: доска та же самая (части живы и не сдвинулись)
+local function gridValid()
+    if #Board.cells == 0 then return false end
+    local folder = Board.folder
+    if not folder or not folder.Parent then return false end
+    local tol = (Board.sp or 5) * 0.4
+    local tol2 = tol * tol
+    local cells = Board.cells
+    for i = 1, #cells do
+        local c = cells[i]
+        local p = c.part
+        if not p or not p.Parent or p.Parent ~= folder then return false end
+        local dx, dz = p.Position.X - c.pos.X, p.Position.Z - c.pos.Z
+        if dx * dx + dz * dz > tol2 then return false end
+    end
+    return true
+end
+
+--=== МЕТКИ ===========================================================
 local function setMarker(cell, kind)
     if not kind then
         if cell.marker then cell.marker:Destroy(); cell.marker = nil end
@@ -304,7 +321,6 @@ local function setMarker(cell, kind)
         return
     end
 
-    local isGuess = cell.markerGuess and true or false
     local m = cell.marker
     if not m or not m.Parent then
         m = new("Part", {
@@ -327,24 +343,33 @@ local function setMarker(cell, kind)
     if not colorClose(m.Color, col) then m.Color = col end
 
     local scale = 1
-    if isGuess then scale = 0.8 end
+    if cell.markerGuess then scale = 0.8 end
     if kind == "best" then scale = 1.2 end
     local size = CFG.markerSize * scale
     if math.abs(m.Size.X - size) > 0.01 then m.Size = Vector3.new(size, size, size) end
 
-    local trans = CFG.markerTrans + (isGuess and 0.4 or 0)
+    local trans = CFG.markerTrans + (cell.markerGuess and 0.4 or 0)
     if math.abs(m.Transparency - trans) > 0.01 then m.Transparency = trans end
 
-    local y = cell.pos.Y + (part.Size.Y / 2) + CFG.markerHeight
-    if (m.Position - Vector3.new(cell.pos.X, y, cell.pos.Z)).Magnitude > 0.02 then
-        m.Position = Vector3.new(cell.pos.X, y, cell.pos.Z)
-    end
+    -- позиция берётся от ЖИВОЙ клетки
+    local p = part.Position
+    local want = Vector3.new(p.X, p.Y + (part.Size.Y / 2) + CFG.markerHeight, p.Z)
+    if (m.Position - want).Magnitude > 0.02 then m.Position = want end
 end
 
 local function clearAllMarkers()
     for i = 1, #Board.cells do
         local c = Board.cells[i]
-        if c.marker then c.marker:Destroy(); c.marker = nil end
+        if c.marker then
+            pcall(function() c.marker:Destroy() end)
+            c.marker = nil
+        end
+    end
+    -- страховка: убираем всё осиротевшее в папке меток
+    if markerFolder then
+        for _, ch in ipairs(markerFolder:GetChildren()) do
+            pcall(function() ch:Destroy() end)
+        end
     end
 end
 
@@ -588,14 +613,14 @@ local function autoReveal(safe)
     local best, bd
     for i = 1, #Board.covered do
         local c = Board.covered[i]
-        if safe[c] and c.state == "unknown" then
-            local d = (c.pos - hrp.Position).Magnitude
+        if safe[c] and c.state == "unknown" and c.part and c.part.Parent then
+            local d = (c.part.Position - hrp.Position).Magnitude
             if not bd or d < bd then best, bd = c, d end
         end
     end
     if best and bd and bd > 0.6 then
-        local y = best.pos.Y + best.part.Size.Y / 2 + 3
-        hrp.CFrame = CFrame.new(best.pos.X, y, best.pos.Z)
+        local p = best.part.Position
+        hrp.CFrame = CFrame.new(p.X, p.Y + best.part.Size.Y / 2 + 3, p.Z)
         hrp.AssemblyLinearVelocity = Vector3.new(0, -170, 0)
         task.wait(0.07)
         hrp.AssemblyLinearVelocity = Vector3.zero
@@ -1274,14 +1299,11 @@ addSlider(tabMines, "Размер меток", "markerSize", 0.3, 2.0, 2)
 addSlider(tabMines, "Прозрачность меток", "markerTrans", 0, 0.9, 2)
 addSlider(tabMines, "Высота меток", "markerHeight", 0.4, 5.0, 1)
 addButton(tabMines, "Убрать метки", function() clearAllMarkers(); clearAllPaint() end)
-addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ точка = безопасно. Плотные — точный вывод логики, полупрозрачные — догадка (может ошибаться). Голубая = лучший ход. Открытые клетки меток не имеют.", 52)
+addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ точка = безопасно. Плотные — точный вывод логики, полупрозрачные — догадка. Голубая = лучший ход.", 40)
 
 addSection(tabMines, "ДОПОЛНИТЕЛЬНО")
 addToggle(tabMines, "Тепловая карта (риск по всей доске)", "heatmap")
 addToggle(tabMines, "Красить клетки (старый режим)", "paintTiles")
-addButton(tabMines, "Сбросить подсветку", function()
-    clearAllMarkers(); clearAllPaint()
-end)
 
 addSection(tabAuto, "АВТОМАТИКА")
 addToggle(tabAuto, "Auto Flag (ставить флаги)", "autoFlag")
@@ -1291,7 +1313,7 @@ addButton(tabAuto, "RAGE: вскрыть всю карту", function()
     syncUI()
     notify("Rage-режим: карта вскрывается полностью")
 end, THEME.accent)
-addNote(tabAuto, "Rage прогоняет безопасные клетки телепортом и ставит флаги — доска очищается, все мины становятся точными (плотные красные точки без догадок).", 44)
+addNote(tabAuto, "Rage прогоняет безопасные клетки и ставит флаги — доска очищается, все мины становятся точными.", 34)
 
 addSection(tabVisual, "КАМЕРА")
 addSlider(tabVisual, "FOV (поле зрения)", "fov", 50, 130, 0, applyFOV)
@@ -1323,9 +1345,10 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     print("===== VENICE HUB DEBUG =====")
     print("Доска:", folder and folder:GetFullName() or "НЕ НАЙДЕНА")
     print("Цвет закрытой клетки (авто):", tostring(Board.coverColor))
+    print("Клеток в сетке:", #Board.cells, "| сетка:", Board.w .. "x" .. Board.h)
+    print("Меток на карте:", #markerFolder:GetChildren())
     if folder then
         local kids = folder:GetChildren()
-        print("Клеток:", #kids, "| сетка:", Board.w .. "x" .. Board.h)
         for i = 1, math.min(3, #kids) do
             local p = kids[i]
             print(("-- %s [%s] Color=%s BrickColor=%s"):format(p:GetFullName(), p.ClassName,
@@ -1346,7 +1369,7 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     print("===== END DEBUG =====")
 end)
 addButton(tabDebug, "Пересобрать доску", function() Board.lastCount = -1 end)
-addNote(tabDebug, "Если у клеток есть атрибуты/значения про мины — режим в статусе станет «атрибуты», и все метки будут точными без догадок.", 40)
+addNote(tabDebug, "Если меток на карте заметно больше, чем клеток — нажми «Убрать метки» и сообщи.", 34)
 
 switchTab("Mines")
 
@@ -1355,14 +1378,24 @@ local lastSolve, mineSet, safeSet, riskSet, bestGuess = 0, {}, {}, {}, nil
 
 local function tick(t)
     local folder = findBoard()
+
+    -- доска изменилась / части мертвы / доска переехала => пересобираем
+    local rebuild = false
     if folder ~= Board.folder then
-        Board.folder, Board.lastCount = folder, folder and #folder:GetChildren() or -1
-        if folder then buildGrid(folder) end
-        clearAllMarkers(); clearAllPaint()
+        rebuild = true
     elseif folder and #folder:GetChildren() ~= Board.lastCount then
-        Board.lastCount = #folder:GetChildren()
-        buildGrid(folder)
-        clearAllMarkers(); clearAllPaint()
+        rebuild = true
+    elseif not gridValid() then
+        rebuild = true
+    end
+
+    if rebuild then
+        -- ВАЖНО: чистим ДО buildGrid, пока Board.cells ещё старые
+        clearAllMarkers()
+        clearAllPaint()
+        Board.folder = folder
+        Board.lastCount = folder and #folder:GetChildren() or -1
+        if folder then buildGrid(folder) end
     end
 
     if not Board.folder or #Board.cells == 0 then
@@ -1378,7 +1411,6 @@ local function tick(t)
         riskSet, bestGuess = computeRisk(mineSet, safeSet)
     end
 
-    -- метки: красная = мина, синяя = безопасно (догадки полупрозрачные)
     for i = 1, #Board.cells do
         local c = Board.cells[i]
         local kind, isGuess
@@ -1394,10 +1426,8 @@ local function tick(t)
 
         c.markerGuess = isGuess and true or false
 
-        local wantM = (CFG.showMines and CFG.markers) and kind or nil
-        local wantP = (CFG.showMines and CFG.paintTiles) and kind or nil
-        setMarker(c, wantM)
-        setPaint(c, wantP)
+        setMarker(c, (CFG.showMines and CFG.markers) and kind or nil)
+        setPaint(c, (CFG.showMines and CFG.paintTiles) and kind or nil)
     end
 
     if CFG.showMines and CFG.markers and CFG.markerBest and bestGuess and bestGuess.part then
@@ -1485,5 +1515,5 @@ end
 
 --====================== 10. СТАРТ ====================================
 applyFOV()
-notify("Venice Hub 3.0 · Home = меню")
-print("[Venice Hub 3.0] загружен. Home — меню.")
+notify("Venice Hub 3.1 · Home = меню")
+print("[Venice Hub 3.1] загружен. Home — меню.")
