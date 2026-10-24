@@ -1,10 +1,10 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v1.1
       ------------------------------------------------------------------
       Меню      : RightShift  (меняется в «Настройках»)
       Функции   : Показать все мины (решатель + подсветка)
                   Auto Flag, Auto Reveal, FOV, Fullbright,
-                  своё небо (6 пресетов), скины на флаг (7 видов)
+                  своё небо (6 пресетов), скины на флаг (8 видов)
       Игра      : roblox.com/games/7871169780
       Экзекьютор: любой (Delta / Xeno / Solara / Wave / Krnl / Velocity)
 =======================================================================]]
@@ -24,7 +24,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "1.0" }
+local VMS = { version = "1.1" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -49,6 +49,7 @@ local CFG = {
     flagSkin   = "Default",
     skinHue    = 280,
     keybind    = Enum.KeyCode.RightShift,
+    uiTrans    = 0,        -- прозрачность окна
 }
 
 --====================== 2. ЦВЕТА И ХЕЛПЕРЫ ===========================
@@ -415,14 +416,14 @@ local function autoFlag(mine)
     end
 end
 
-local function autoReveal()
+local function autoReveal(safe)
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
     local best, bd
     for i = 1, #Board.covered do
         local c = Board.covered[i]
-        if c.state == "unknown" and c.painted == "safe" then
+        if safe[c] and c.state == "unknown" then
             local d = (c.pos - hrp.Position).Magnitude
             if not bd or d < bd then best, bd = c, d end
         end
@@ -631,6 +632,9 @@ new("UIGradient", { Rotation = 90,
     Color = ColorSequence.new(Color3.fromRGB(17, 17, 22), Color3.fromRGB(8, 8, 10)) }, main)
 local mainScale = new("UIScale", { Scale = 1 }, main)
 
+-- заранее, чтобы колбэки кнопок окна видели эти переменные (а не nil-глобалы)
+local sidebar, content, statusbar
+
 local top = new("Frame", { Size = UDim2.new(1, 0, 0, 50), BackgroundTransparency = 1 }, main)
 
 local title = new("TextLabel", {
@@ -650,7 +654,7 @@ local collapsed = false
 local function toggleWindow()
     if main.Visible then
         tw(mainScale, { Scale = 0.92 }, 0.16)
-        local t = tw(main, { BackgroundTransparency = 0 }, 0.16, Enum.EasingStyle.Quad)
+        local t = tw(main, { BackgroundTransparency = 1 }, 0.16, Enum.EasingStyle.Quad)
         t.Completed:Connect(function()
             if not main.Visible then return end
             main.Visible = false
@@ -658,6 +662,7 @@ local function toggleWindow()
     else
         main.Visible = true
         mainScale.Scale = 0.92
+        tw(main, { BackgroundTransparency = CFG.uiTrans }, 0.2)
         tw(mainScale, { Scale = 1 }, 0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
     end
 end
@@ -714,7 +719,7 @@ do
     end))
 end
 
-local sidebar = new("Frame", {
+sidebar = new("Frame", {
     Size = UDim2.new(0, 152, 1, -80), Position = UDim2.new(0, 0, 0, 50),
     BackgroundTransparency = 1,
 }, main)
@@ -725,12 +730,12 @@ local indicator = new("Frame", {
 }, sidebar)
 corner(indicator, 2)
 
-local content = new("Frame", {
+content = new("Frame", {
     Size = UDim2.new(1, -170, 1, -86), Position = UDim2.new(0, 162, 0, 52),
     BackgroundTransparency = 1,
 }, main)
 
-local statusbar = new("TextLabel", {
+statusbar = new("TextLabel", {
     Size = UDim2.new(1, -36, 0, 22), Position = UDim2.new(0, 18, 1, -28),
     BackgroundTransparency = 1, Font = Enum.Font.Code, TextSize = 12,
     TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left, Text = "...",
@@ -849,17 +854,10 @@ local function toggle(page, text, key, cb)
     }, track)
     corner(knob, 7)
 
-    local function render(instant)
+    local function render()
         local on = CFG[key]
-        local props = { BackgroundColor3 = on and THEME.on or THEME.off }
-        local kp = on and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
-        if instant then
-            track.BackgroundColor3 = props.BackgroundColor3
-            knob.Position = kp
-        else
-            tw(track, props, 0.2)
-            tw(knob, { Position = kp }, 0.2)
-        end
+        tw(track, { BackgroundColor3 = on and THEME.on or THEME.off }, 0.2)
+        tw(knob, { Position = on and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7) }, 0.2)
     end
 
     local hit = new("TextButton", { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "" }, f)
@@ -872,8 +870,10 @@ local function toggle(page, text, key, cb)
 end
 
 local function slider(page, text, key, min, max, decimals, cb)
+    if CFG[key] == nil then CFG[key] = min end   -- защита от отсутствующего ключа
+
     local f = row(page, 52)
-    local lbl = new("TextLabel", {
+    new("TextLabel", {
         BackgroundTransparency = 1, Position = UDim2.new(0, 14, 0, 6), Size = UDim2.new(1, -74, 0, 16),
         Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = THEME.text,
         Text = text, TextXAlignment = Enum.TextXAlignment.Left,
@@ -918,18 +918,22 @@ local function slider(page, text, key, min, max, decimals, cb)
     end
 
     local dragging = false
+    local function fromInput(input)
+        local w = bar.AbsoluteSize.X
+        if w <= 0 then return end
+        setValue(min + (max - min) * math.clamp((input.Position.X - bar.AbsolutePosition.X) / w, 0, 1))
+    end
+
     bind(bar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
-            local w = bar.AbsoluteSize.X
-            if w > 0 then setValue(min + (max - min) * math.clamp((input.Position.X - bar.AbsolutePosition.X) / w, 0, 1)) end
+            fromInput(input)
         end
     end))
     bind(UIS.InputChanged:Connect(function(input)
         if not dragging then return end
         if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local w = bar.AbsoluteSize.X
-        if w > 0 then setValue(min + (max - min) * math.clamp((input.Position.X - bar.AbsolutePosition.X) / w, 0, 1)) end
+        fromInput(input)
     end))
     bind(UIS.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -1061,14 +1065,12 @@ local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 2)
 local tabSet = makeTab("Settings", "НАСТРОЙКИ", 3)
 
 section(tabMines, "РЕШАТЕЛЬ")
-local renderShow = toggle(tabMines, "Показать все мины", "showMines", function(v)
+toggle(tabMines, "Показать все мины", "showMines", function(v)
     if not v then clearAllPaint() end
 end)
 toggle(tabMines, "Auto Flag (ставить флаги)", "autoFlag")
 toggle(tabMines, "Auto Reveal (прыгать по безопасным)", "autoReveal")
-button(tabMines, "Пересобрать доску", function()
-    Board.lastCount = -1
-end)
+button(tabMines, "Пересобрать доску", function() Board.lastCount = -1 end)
 button(tabMines, "Сбросить подсветку", clearAllPaint)
 labelText(tabMines, "Красное — мина, зелёное — безопасная клетка. Данные берутся из логики цифр; если игра отдаёт атрибуты мин, они используются напрямую.", 44)
 
@@ -1089,11 +1091,11 @@ slider(tabVisual, "Оттенок (Custom Hue)", "skinHue", 0, 360, 0)
 
 section(tabSet, "УПРАВЛЕНИЕ")
 keybindRow(tabSet, "Клавиша меню", "keybind")
-slider(tabSet, "Прозрачность окна", "_t", 0, 1, 2, function(v)
+slider(tabSet, "Прозрачность окна", "uiTrans", 0, 1, 2, function(v)
     main.BackgroundTransparency = v
 end)
 button(tabSet, "Выгрузить скрипт", function() VMS.destroy() end)
-labelText(tabSet, "Venice Hub 1.0 · Minesweeper Edition", 18)
+labelText(tabSet, "Venice Hub 1.1 · Minesweeper Edition", 18)
 
 -- тосты
 local toastHolder = new("Frame", {
@@ -1129,7 +1131,6 @@ switchTab("Mines")
 
 --====================== 6. ГЛАВНЫЙ ЦИКЛ ==============================
 local lastSolve, mineSet, safeSet = 0, {}, {}
-local solveMode = "логика"
 
 local function tick(t)
     local folder = findBoard()
@@ -1150,26 +1151,23 @@ local function tick(t)
 
     refresh()
 
-    local needSolve = CFG.showMines or CFG.autoFlag or CFG.autoReveal
-    if needSolve and t - lastSolve > 0.3 then
+    if (CFG.showMines or CFG.autoFlag or CFG.autoReveal) and t - lastSolve > 0.3 then
         lastSolve = t
         mineSet, safeSet = solve()
     end
 
     if CFG.showMines then
-        local painted = 0
         for i = 1, #Board.covered do
             local c = Board.covered[i]
-            local want = mineSet[c] and "mine" or (safeSet[c] and "safe" or nil)
-            setPaint(c, want)
-            if want then painted += 1 end
+            setPaint(c, mineSet[c] and "mine" or (safeSet[c] and "safe" or nil))
         end
-        if CFG.autoFlag then autoFlag(mineSet) end
     else
-        if CFG.autoFlag then autoFlag(mineSet) end
+        for i = 1, #Board.cells do setPaint(Board.cells[i], nil) end
     end
 
-    if CFG.autoReveal then autoReveal() end
+    if CFG.autoFlag then autoFlag(mineSet) end
+    if CFG.autoReveal then autoReveal(safeSet) end
+
     applySkins(t)
     applyFOV()
 
@@ -1223,7 +1221,7 @@ function VMS.destroy()
         for part, o in pairs(flagOrig) do
             if part and part.Parent then
                 part.Color, part.Material = o.Color, o.Material
-                part.Transparency, p.Reflectance = o.Transparency, o.Reflectance
+                part.Transparency, part.Reflectance = o.Transparency, o.Reflectance
             end
         end
     end)
