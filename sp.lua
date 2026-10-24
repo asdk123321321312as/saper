@@ -1,5 +1,5 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v2.0
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v2.1
       ------------------------------------------------------------------
       Меню     : Home   (меняется в «Настройках»)
       Мины     : точные мины/безопасные (логика + подмножества),
@@ -25,7 +25,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "2.0" }
+local VMS = { version = "2.1" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -42,10 +42,10 @@ end
 --====================== 1. НАСТРОЙКИ =================================
 local CFG = {
     showMines  = true,
-    heatmap    = true,     -- красить ВСЮ доску по вероятности риска
+    heatmap    = true,
     autoFlag   = false,
     autoReveal = false,
-    density    = 0.16,     -- оценка плотности мин (для приора)
+    density    = 0.16,
     fov        = 70,
     fullbright = false,
     sky        = "Default",
@@ -95,15 +95,15 @@ end
 --====================== 3. ЛОГИКА ДОСКИ ==============================
 local Board = {
     folder = nil, cells = {}, covered = {}, numbers = {},
-    w = 0, h = 0, lastCount = -1,
+    w = 0, h = 0, lastCount = -1, truthMode = "логика",
 }
 
 local PAINTS = {
-    mine  = Color3.fromRGB(255, 45, 45),    -- точная мина
-    safe  = Color3.fromRGB(0, 255, 110),    -- точно безопасно
-    gmine = Color3.fromRGB(255, 150, 40),   -- вероятная мина (риск > 50%)
-    gsafe = Color3.fromRGB(80, 165, 255),   -- вероятно безопасно
-    guess = Color3.fromRGB(0, 255, 255),    -- лучший ход
+    mine  = Color3.fromRGB(255, 45, 45),
+    safe  = Color3.fromRGB(0, 255, 110),
+    gmine = Color3.fromRGB(255, 150, 40),
+    gsafe = Color3.fromRGB(80, 165, 255),
+    guess = Color3.fromRGB(0, 255, 255),
 }
 
 local function findBoard()
@@ -223,7 +223,6 @@ local function buildGrid(folder)
     Board.covered, Board.numbers = {}, {}
 end
 
---=== поиск «истины», если игра её отдаёт (атрибуты / значения) ========
 local function probeTruth(part)
     for k, v in pairs(part:GetAttributes()) do
         local lk = string.lower(k)
@@ -283,7 +282,7 @@ end
 
 local function refresh()
     Board.covered, Board.numbers = {}, {}
-    local cells = Board.cells
+    local cells, truthHits = Board.cells, 0
     for i = 1, #cells do
         local c = cells[i]
         local part = c.part
@@ -293,6 +292,7 @@ local function refresh()
             end
 
             c.truth = probeTruth(part)
+            if c.truth then truthHits += 1 end
 
             local num = numberAt(part)
             if num then
@@ -317,6 +317,7 @@ local function refresh()
             end
         end
     end
+    Board.truthMode = truthHits > 0 and "атрибуты" or "логика"
 end
 
 local function solve()
@@ -409,7 +410,6 @@ local function solve()
     return mine, safe
 end
 
---=== тепловая карта: риск мины для КАЖДОЙ закрытой клетки ============
 local function computeRisk(mine, safe)
     local risk = {}
     local unknown, knownMines = 0, 0
@@ -751,7 +751,6 @@ topButton("—", -70, function()
     end
 end)
 
--- перетаскивание
 do
     local dragging, startPos, startMouse
     bind(top.InputBegan:Connect(function(input)
@@ -804,7 +803,7 @@ local function makePage(name)
         BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
         ScrollBarThickness = 3, ScrollBarImageColor3 = THEME.accent,
         ScrollingDirection = Enum.ScrollingDirection.Y,
-        CanvasSize = UDim2.new(0, 0, 0, 100),
+        CanvasSize = UDim2.new(0, 0, 0, 400),
     }, content)
     pages[name] = p
     cursors[p] = 0
@@ -826,6 +825,7 @@ local function switchTab(name)
     end
 end
 
+-- ВАЖНО: возвращаем СТРАНИЦУ (а не кнопку) — иначе элементы уезжают в сайдбар
 local function makeTab(name, label, order)
     local b = new("TextButton", {
         Name = name, Size = UDim2.new(1, -12, 0, 38), Position = UDim2.new(0, 12, 0, 12 + (order - 1) * 44),
@@ -843,13 +843,12 @@ local function makeTab(name, label, order)
     end))
     bind(b.MouseButton1Click:Connect(function() switchTab(name) end))
     tabButtons[name] = b
-    makePage(name)
-    return b
+    return makePage(name)
 end
 
--- --- элементы (жёсткая раскладка, без UIListLayout) ---
+-- --- элементы (жёсткая раскладка) ---
 local function item(page, h, gap, transparent)
-    local y = cursors[page]
+    local y = cursors[page] or 0
     cursors[page] = y + h + (gap or 6)
     page.CanvasSize = UDim2.new(0, 0, 0, cursors[page] + 6)
     local f = new("Frame", {
@@ -1001,12 +1000,13 @@ local function addSlider(page, text, key, min, max, decimals, cb)
 end
 
 local function addButton(page, text, cb, accent)
+    local y = cursors[page] or 0
     local b = new("TextButton", {
-        Size = UDim2.new(1, -10, 0, 36), Position = UDim2.new(0, 0, 0, cursors[page]),
+        Size = UDim2.new(1, -10, 0, 36), Position = UDim2.new(0, 0, 0, y),
         BackgroundColor3 = accent or THEME.panel, Text = text, Font = Enum.Font.GothamMedium,
         TextSize = 13, TextColor3 = THEME.text, AutoButtonColor = false, BorderSizePixel = 0,
     }, page)
-    cursors[page] = cursors[page] + 42
+    cursors[page] = y + 42
     page.CanvasSize = UDim2.new(0, 0, 0, cursors[page] + 6)
     corner(b, 9)
     bind(b.MouseEnter:Connect(function() tw(b, { BackgroundColor3 = accent or THEME.panel2 }, 0.15) end))
@@ -1072,7 +1072,7 @@ local function addDropdown(page, text, key, options, cb)
             cur.Text = opt
             list.Visible = false
             arrow.Text = "v"
-            page.CanvasSize = UDim2.new(0, 0, 0, cursors[page] + 6)
+            page.CanvasSize = UDim2.new(0, 0, 0, (cursors[page] or 0) + 6)
             if cb then cb(opt) end
         end))
     end
@@ -1092,7 +1092,7 @@ local function addDropdown(page, text, key, options, cb)
     bind(hit.MouseButton1Click:Connect(function()
         list.Visible = not list.Visible
         arrow.Text = list.Visible and "^" or "v"
-        page.CanvasSize = UDim2.new(0, 0, 0, cursors[page] + (list.Visible and 160 or 6))
+        page.CanvasSize = UDim2.new(0, 0, 0, (cursors[page] or 0) + (list.Visible and 160 or 6))
     end))
     return f
 end
@@ -1125,11 +1125,40 @@ local function addKeybind(page, text, key, cb)
     return f
 end
 
+-- тосты (объявляем notify заранее — его дергает кнопка RAGE ниже)
+local toastHolder = new("Frame", {
+    Size = UDim2.new(0, 260, 0, 420), Position = UDim2.new(1, -18, 1, -18),
+    AnchorPoint = Vector2.new(1, 1), BackgroundTransparency = 1,
+}, gui)
+
+local notify
+function notify(text)
+    local outer = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 42), BackgroundTransparency = 1,
+    }, toastHolder)
+    local inner = new("Frame", {
+        Size = UDim2.new(1, 0, 1, 0), Position = UDim2.new(0, 260, 0, 0),
+        BackgroundColor3 = THEME.panel, BorderSizePixel = 0,
+    }, outer)
+    corner(inner, 10)
+    stroke(inner, THEME.accent, 1, 0.6)
+    new("TextLabel", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, -18, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = THEME.text,
+        Text = text, TextXAlignment = Enum.TextXAlignment.Left,
+    }, inner)
+    tw(inner, { Position = UDim2.new(0, 0, 0, 0) }, 0.28)
+    task.delay(2.6, function()
+        tw(inner, { Position = UDim2.new(0, 270, 0, 0) }, 0.24)
+        task.delay(0.3, function() outer:Destroy() end)
+    end)
+end
+
 --====================== 6. НАПОЛНЕНИЕ ================================
-local tabMines   = makeTab("Mines", "МИНЫ", 1)
-local tabVisual  = makeTab("Visual", "ВИЗУАЛЫ", 2)
-local tabSet     = makeTab("Settings", "НАСТРОЙКИ", 3)
-local tabDebug   = makeTab("Debug", "ДЕБАГ", 4)
+local tabMines  = makeTab("Mines", "МИНЫ", 1)
+local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 2)
+local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 3)
+local tabDebug  = makeTab("Debug", "ДЕБАГ", 4)
 
 addSection(tabMines, "РЕШАТЕЛЬ И ПОДСВЕТКА")
 addToggle(tabMines, "Показывать мины и риск", "showMines", function(v)
@@ -1198,36 +1227,7 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     print("===== END DEBUG =====")
 end)
 addButton(tabDebug, "Пересобрать доску", function() Board.lastCount = -1 end)
-addNote(tabDebug, "Если в дампе у клеток есть атрибуты/значения про мины — скрипт уже использует их как истину (режим «атрибуты» в статусе). Иначе работает логика + тепловая карта.", 52)
-
--- тосты
-local toastHolder = new("Frame", {
-    Size = UDim2.new(0, 260, 0, 420), Position = UDim2.new(1, -18, 1, -18),
-    AnchorPoint = Vector2.new(1, 1), BackgroundTransparency = 1,
-}, gui)
-
-local function notify(text)
-    local outer = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 42), BackgroundTransparency = 1,
-        Position = UDim2.new(0, 0, 0, 0),
-    }, toastHolder)
-    local inner = new("Frame", {
-        Size = UDim2.new(1, 0, 1, 0), Position = UDim2.new(0, 260, 0, 0),
-        BackgroundColor3 = THEME.panel, BorderSizePixel = 0,
-    }, outer)
-    corner(inner, 10)
-    stroke(inner, THEME.accent, 1, 0.6)
-    new("TextLabel", {
-        BackgroundTransparency = 1, Size = UDim2.new(1, -18, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-        Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = THEME.text,
-        Text = text, TextXAlignment = Enum.TextXAlignment.Left,
-    }, inner)
-    tw(inner, { Position = UDim2.new(0, 0, 0, 0) }, 0.28)
-    task.delay(2.6, function()
-        tw(inner, { Position = UDim2.new(0, 270, 0, 0) }, 0.24)
-        task.delay(0.3, function() outer:Destroy() end)
-    end)
-end
+addNote(tabDebug, "Если в дампе у клеток есть атрибуты/значения про мины — скрипт использует их как истину (режим «атрибуты» в статусе). Иначе работает логика + тепловая карта.", 52)
 
 switchTab("Mines")
 
@@ -1291,7 +1291,7 @@ local function tick(t)
         if not mineSet[c] and not safeSet[c] then unknown += 1 end
     end
     statusbar.Text = ("Доска %dx%d  |  мины: %d  |  безопасно: %d  |  ?%d  |  режим: %s")
-        :format(Board.w, Board.h, mines, safe, unknown, Board.truthMode or "логика")
+        :format(Board.w, Board.h, mines, safe, unknown, Board.truthMode)
 end
 
 task.spawn(function()
@@ -1355,5 +1355,5 @@ end
 
 --====================== 10. СТАРТ ====================================
 applyFOV()
-notify("Venice Hub 2.0 · Home = меню")
-print("[Venice Hub 2.0] загружен. Home — меню, вкладка ДЕБАГ — дамп структуры.")
+notify("Venice Hub 2.1 · Home = меню")
+print("[Venice Hub 2.1] загружен. Home — меню, вкладка ДЕБАГ — дамп структуры.")
