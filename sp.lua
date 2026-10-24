@@ -1,7 +1,8 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.1
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.2
       ------------------------------------------------------------------
-      Меню     : Home   (меняется в «Настройках»)
+      Меню     : Home   (все клавиши меняются: НАСТРОЙКИ -> КЛАВИШИ)
+      Хоткеи   : G = догадки вкл/выкл, H = метки вкл/выкл, J = rage
       Мины     : метка-точка в центре клетки:
                    КРАСНАЯ = мина, СИНЯЯ = безопасно
                    точные — плотные, догадки — полупрозрачные
@@ -25,7 +26,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "3.1" }
+local VMS = { version = "3.2" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -58,7 +59,10 @@ local CFG = {
     sky          = "Default",
     flagSkin     = "Default",
     skinHue      = 280,
-    keybind      = Enum.KeyCode.Home,
+    keybind      = Enum.KeyCode.Home,   -- меню
+    keyGuess     = Enum.KeyCode.G,      -- догадки вкл/выкл
+    keyMarkers   = Enum.KeyCode.H,      -- метки вкл/выкл
+    keyRage      = Enum.KeyCode.J,      -- rage
     uiTrans      = 0,
 }
 
@@ -291,7 +295,6 @@ local function buildGrid(folder)
     Board.covered, Board.numbers, Board.sp = {}, {}, sp
 end
 
--- проверка: доска та же самая (части живы и не сдвинулись)
 local function gridValid()
     if #Board.cells == 0 then return false end
     local folder = Board.folder
@@ -351,7 +354,6 @@ local function setMarker(cell, kind)
     local trans = CFG.markerTrans + (cell.markerGuess and 0.4 or 0)
     if math.abs(m.Transparency - trans) > 0.01 then m.Transparency = trans end
 
-    -- позиция берётся от ЖИВОЙ клетки
     local p = part.Position
     local want = Vector3.new(p.X, p.Y + (part.Size.Y / 2) + CFG.markerHeight, p.Z)
     if (m.Position - want).Magnitude > 0.02 then m.Position = want end
@@ -365,7 +367,6 @@ local function clearAllMarkers()
             c.marker = nil
         end
     end
-    -- страховка: убираем всё осиротевшее в папке меток
     if markerFolder then
         for _, ch in ipairs(markerFolder:GetChildren()) do
             pcall(function() ch:Destroy() end)
@@ -828,9 +829,9 @@ local title = new("TextLabel", {
 }, top)
 new("UIGradient", { Color = ColorSequence.new(THEME.accent2, THEME.accent) }, title)
 
-new("TextLabel", {
-    BackgroundTransparency = 1, Position = UDim2.new(0, 18, 0, 30), Size = UDim2.new(0, 340, 0, 14),
-    Font = Enum.Font.Gotham, TextSize = 11, Text = "bLockerman's Minesweeper  ·  Home = меню",
+local hintLabel = new("TextLabel", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 18, 0, 30), Size = UDim2.new(0, 460, 0, 14),
+    Font = Enum.Font.Gotham, TextSize = 11, Text = "",
     TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
 }, top)
 
@@ -927,6 +928,11 @@ statusbar = new("TextLabel", {
 local pages, cursors, tabButtons, currentTab = {}, {}, {}, nil
 local syncers = {}
 local function syncUI() for _, f in ipairs(syncers) do pcall(f) end end
+
+local function refreshHint()
+    hintLabel.Text = ("%s = меню  ·  %s = догадки  ·  %s = метки  ·  %s = rage"):format(
+        CFG.keybind.Name, CFG.keyGuess.Name, CFG.keyMarkers.Name, CFG.keyRage.Name)
+end
 
 local function makePage(name)
     local p = new("ScrollingFrame", {
@@ -1226,7 +1232,9 @@ local function addDropdown(page, text, key, options, cb)
     return f
 end
 
-local awaitingKey = false
+-- несколько строк биндов: помним, кто сейчас ждёт клавишу
+local awaitingKey, awaitingSetter = false, nil
+
 local function addKeybind(page, text, key, cb)
     local f = item(page, 38)
     hoverable(f)
@@ -1244,13 +1252,13 @@ local function addKeybind(page, text, key, cb)
     corner(b, 8)
     bind(b.MouseButton1Click:Connect(function()
         awaitingKey = true
+        awaitingSetter = function(k)
+            CFG[key] = k
+            b.Text = k.Name
+            if cb then cb(k) end
+        end
         b.Text = "жми клавишу..."
     end))
-    VMS._setKey = function(k)
-        CFG[key] = k
-        b.Text = k.Name
-        if cb then cb(k) end
-    end
     return f
 end
 
@@ -1289,6 +1297,12 @@ local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 3)
 local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 4)
 local tabDebug  = makeTab("Debug", "ДЕБАГ", 5)
 
+local function setRage(on)
+    CFG.showMines, CFG.heatmap, CFG.markerGuess = true, true, true
+    CFG.autoFlag, CFG.autoReveal = on, on
+    syncUI()
+end
+
 addSection(tabMines, "МЕТКИ НА КЛЕТКАХ")
 addToggle(tabMines, "Показывать мины (метки)", "showMines", function(v)
     if not v then clearAllMarkers(); clearAllPaint() end
@@ -1309,9 +1323,8 @@ addSection(tabAuto, "АВТОМАТИКА")
 addToggle(tabAuto, "Auto Flag (ставить флаги)", "autoFlag")
 addToggle(tabAuto, "Auto Reveal (вскрывать безопасные)", "autoReveal")
 addButton(tabAuto, "RAGE: вскрыть всю карту", function()
-    CFG.showMines, CFG.heatmap, CFG.markerGuess, CFG.autoFlag, CFG.autoReveal = true, true, true, true, true
-    syncUI()
-    notify("Rage-режим: карта вскрывается полностью")
+    setRage(true)
+    notify("Rage: вкл")
 end, THEME.accent)
 addNote(tabAuto, "Rage прогоняет безопасные клетки и ставит флаги — доска очищается, все мины становятся точными.", 34)
 
@@ -1328,8 +1341,13 @@ addDropdown(tabVisual, "Скин флага", "flagSkin", {
 })
 addSlider(tabVisual, "Оттенок (Custom Hue)", "skinHue", 0, 360, 0)
 
-addSection(tabSet, "УПРАВЛЕНИЕ")
-addKeybind(tabSet, "Клавиша меню", "keybind")
+addSection(tabSet, "КЛАВИШИ")
+addKeybind(tabSet, "Меню", "keybind", refreshHint)
+addKeybind(tabSet, "Догадки вкл/выкл", "keyGuess", refreshHint)
+addKeybind(tabSet, "Метки вкл/выкл", "keyMarkers", refreshHint)
+addKeybind(tabSet, "Rage вкл/выкл", "keyRage", refreshHint)
+
+addSection(tabSet, "ПРОЧЕЕ")
 addSlider(tabSet, "Прозрачность окна", "uiTrans", 0, 1, 2, function(v)
     main.BackgroundTransparency = v
 end)
@@ -1372,6 +1390,7 @@ addButton(tabDebug, "Пересобрать доску", function() Board.lastCo
 addNote(tabDebug, "Если меток на карте заметно больше, чем клеток — нажми «Убрать метки» и сообщи.", 34)
 
 switchTab("Mines")
+refreshHint()
 
 --====================== 7. ЦИКЛ ======================================
 local lastSolve, mineSet, safeSet, riskSet, bestGuess = 0, {}, {}, {}, nil
@@ -1379,7 +1398,6 @@ local lastSolve, mineSet, safeSet, riskSet, bestGuess = 0, {}, {}, {}, nil
 local function tick(t)
     local folder = findBoard()
 
-    -- доска изменилась / части мертвы / доска переехала => пересобираем
     local rebuild = false
     if folder ~= Board.folder then
         rebuild = true
@@ -1390,7 +1408,6 @@ local function tick(t)
     end
 
     if rebuild then
-        -- ВАЖНО: чистим ДО buildGrid, пока Board.cells ещё старые
         clearAllMarkers()
         clearAllPaint()
         Board.folder = folder
@@ -1465,13 +1482,35 @@ end)
 --====================== 8. ВВОД ======================================
 bind(UIS.InputBegan:Connect(function(input, gp)
     if not alive then return end
+
+    -- сейчас переназначаем клавишу
     if awaitingKey then
         awaitingKey = false
-        if input.KeyCode ~= Enum.KeyCode.Unknown and VMS._setKey then VMS._setKey(input.KeyCode) end
+        local setter = awaitingSetter
+        awaitingSetter = nil
+        if setter and input.KeyCode ~= Enum.KeyCode.Unknown then setter(input.KeyCode) end
         return
     end
-    if input.KeyCode == CFG.keybind and not gp then
+
+    if gp then return end
+    local k = input.KeyCode
+
+    if k == CFG.keybind then
         toggleWindow()
+    elseif k == CFG.keyGuess then
+        CFG.markerGuess = not CFG.markerGuess
+        if CFG.markerGuess then CFG.heatmap = true end
+        syncUI()
+        notify("Догадки: " .. (CFG.markerGuess and "ВКЛ" or "ВЫКЛ"))
+    elseif k == CFG.keyMarkers then
+        CFG.showMines = not CFG.showMines
+        if not CFG.showMines then clearAllMarkers(); clearAllPaint() end
+        syncUI()
+        notify("Метки: " .. (CFG.showMines and "ВКЛ" or "ВЫКЛ"))
+    elseif k == CFG.keyRage then
+        local on = not (CFG.autoFlag and CFG.autoReveal)
+        setRage(on)
+        notify("Rage: " .. (on and "ВКЛ" or "ВЫКЛ"))
     end
 end))
 
@@ -1515,5 +1554,6 @@ end
 
 --====================== 10. СТАРТ ====================================
 applyFOV()
-notify("Venice Hub 3.1 · Home = меню")
-print("[Venice Hub 3.1] загружен. Home — меню.")
+refreshHint()
+notify("Venice Hub 3.2 · Home = меню · G = догадки")
+print("[Venice Hub 3.2] загружен. Home — меню, G — догадки, H — метки, J — rage.")
