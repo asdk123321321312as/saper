@@ -1,12 +1,11 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v2.2
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.0
       ------------------------------------------------------------------
       Меню     : Home   (меняется в «Настройках»)
-      Мины     : точные мины/безопасные (логика + подмножества),
-                 тепловая карта риска по ВСЕЙ доске,
-                 регулируемая прозрачность подсветки,
-                 открытые клетки не закрашиваются,
-                 авто-флаги, rage-вскрытие карты
+      Мины     : метка-точка в центре клетки:
+                   КРАСНАЯ = мина, СИНЯЯ = безопасно
+                   точные — плотные, догадки — полупрозрачные
+                 размер/высота/прозрачность регулируются
       Визуалы  : FOV, Fullbright, 6 пресетов неба, скины на флаг
       Игра     : roblox.com/games/7871169780
 =======================================================================]]
@@ -27,7 +26,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "2.2" }
+local VMS = { version = "3.0" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -43,19 +42,25 @@ end
 
 --====================== 1. НАСТРОЙКИ =================================
 local CFG = {
-    showMines  = true,
-    heatmap    = true,
-    autoFlag   = false,
-    autoReveal = false,
-    density    = 0.16,
-    paintTrans = 0.35,     -- прозрачность подсветки (0 = сплошная заливка)
-    fov        = 70,
-    fullbright = false,
-    sky        = "Default",
-    flagSkin   = "Default",
-    skinHue    = 280,
-    keybind    = Enum.KeyCode.Home,
-    uiTrans    = 0,
+    showMines    = true,
+    markers      = true,     -- точки в центре клеток
+    markerGuess  = true,     -- помечать и догадки (полупрозрачно)
+    markerBest   = true,     -- метка лучшего хода (голубая)
+    paintTiles   = false,    -- дополнительно красить клетки
+    heatmap      = true,     -- считать риск для всех закрытых клеток
+    markerSize   = 0.9,
+    markerTrans  = 0.1,
+    markerHeight = 1.8,
+    autoFlag     = false,
+    autoReveal   = false,
+    density      = 0.16,
+    fov          = 70,
+    fullbright   = false,
+    sky          = "Default",
+    flagSkin     = "Default",
+    skinHue      = 280,
+    keybind      = Enum.KeyCode.Home,
+    uiTrans      = 0,
 }
 
 --====================== 2. ТЕМА И ХЕЛПЕРЫ ============================
@@ -107,8 +112,16 @@ local PAINTS = {
     safe  = Color3.fromRGB(0, 255, 110),
     gmine = Color3.fromRGB(255, 150, 40),
     gsafe = Color3.fromRGB(80, 165, 255),
-    guess = Color3.fromRGB(0, 255, 255),
+    best  = Color3.fromRGB(0, 255, 255),
 }
+
+local MARKER_COLORS = {
+    mine = Color3.fromRGB(255, 45, 45),
+    safe = Color3.fromRGB(60, 150, 255),
+    best = Color3.fromRGB(0, 255, 255),
+}
+
+local markerFolder = new("Folder", { Name = "VeniceMarkers" }, Workspace)
 
 local function findBoard()
     local root = Workspace:FindFirstChild("Flag")
@@ -170,7 +183,6 @@ local function nearest(list, v)
     return best
 end
 
--- (объявлено ДО buildGrid — buildGrid их использует)
 local function numberAt(part)
     local gui = part:FindFirstChild("NumberGui")
     local lbl = gui and gui:FindFirstChild("TextLabel")
@@ -199,7 +211,6 @@ local function isGreen(col)
     return col.G > col.R + 0.03 and col.G > col.B + 0.03 and col.G > 0.18
 end
 
--- закрытая клетка = зелёная ИЛИ совпадает с авто-определённым цветом закрытых
 local function isCoveredColor(col)
     if isGreen(col) then return true end
     local cc = Board.coverColor
@@ -214,7 +225,6 @@ local function buildGrid(folder)
     end
     if #parts < 4 then Board.cells, Board.w, Board.h = {}, 0, 0; return end
 
-    -- авто-определение цвета закрытой клетки (самый частый цвет среди неоткрытых)
     do
         local counts, sample = {}, {}
         for i = 1, #parts do
@@ -282,14 +292,69 @@ local function buildGrid(folder)
     Board.covered, Board.numbers = {}, {}
 end
 
+--=== МЕТКИ (точки в центре клетки) ===================================
+local function setMarker(cell, kind)
+    if not kind then
+        if cell.marker then cell.marker:Destroy(); cell.marker = nil end
+        return
+    end
+    local part = cell.part
+    if not part or not part.Parent then
+        if cell.marker then cell.marker:Destroy(); cell.marker = nil end
+        return
+    end
+
+    local isGuess = cell.markerGuess and true or false
+    local m = cell.marker
+    if not m or not m.Parent then
+        m = new("Part", {
+            Name = "VMarker",
+            Shape = Enum.PartType.Ball,
+            Size = Vector3.new(1, 1, 1) * CFG.markerSize,
+            Anchored = true, CanCollide = false, CanTouch = false, CanQuery = false,
+            CastShadow = false, Massless = true,
+            Material = Enum.Material.Neon,
+            TopSurface = Enum.SurfaceType.Smooth,
+            BottomSurface = Enum.SurfaceType.Smooth,
+            Color = MARKER_COLORS[kind] or MARKER_COLORS.safe,
+            Transparency = CFG.markerTrans,
+            Parent = markerFolder,
+        }, markerFolder)
+        cell.marker = m
+    end
+
+    local col = MARKER_COLORS[kind] or MARKER_COLORS.safe
+    if not colorClose(m.Color, col) then m.Color = col end
+
+    local scale = 1
+    if isGuess then scale = 0.8 end
+    if kind == "best" then scale = 1.2 end
+    local size = CFG.markerSize * scale
+    if math.abs(m.Size.X - size) > 0.01 then m.Size = Vector3.new(size, size, size) end
+
+    local trans = CFG.markerTrans + (isGuess and 0.4 or 0)
+    if math.abs(m.Transparency - trans) > 0.01 then m.Transparency = trans end
+
+    local y = cell.pos.Y + (part.Size.Y / 2) + CFG.markerHeight
+    if (m.Position - Vector3.new(cell.pos.X, y, cell.pos.Z)).Magnitude > 0.02 then
+        m.Position = Vector3.new(cell.pos.X, y, cell.pos.Z)
+    end
+end
+
+local function clearAllMarkers()
+    for i = 1, #Board.cells do
+        local c = Board.cells[i]
+        if c.marker then c.marker:Destroy(); c.marker = nil end
+    end
+end
+
 local function setPaint(cell, kind)
     local part = cell.part
     if not part or not part.Parent then return end
 
-    -- уже так покрашено: синхронизируем только прозрачность (живой слайдер)
     if kind == cell.painted then
-        if kind and math.abs(part.Transparency - CFG.paintTrans) > 0.001 then
-            part.Transparency = CFG.paintTrans
+        if kind and math.abs(part.Transparency - CFG.markerTrans) > 0.001 then
+            part.Transparency = CFG.markerTrans
         end
         return
     end
@@ -310,7 +375,7 @@ local function setPaint(cell, kind)
     end
     part.Color = PAINTS[kind] or PAINTS.gsafe
     part.Material = Enum.Material.Neon
-    part.Transparency = CFG.paintTrans
+    part.Transparency = CFG.markerTrans
     cell.painted, cell.applied = kind, part.Color
 end
 
@@ -325,7 +390,6 @@ local function refresh()
         local c = cells[i]
         local part = c.part
         if part and part.Parent then
-            -- игра перекрасила клетку => она открылась, снимаем подсветку и возвращаем вид
             if c.painted and c.applied and not colorClose(part.Color, c.applied) then
                 if c.origMaterial then part.Material = c.origMaterial end
                 if c.origTrans ~= nil then part.Transparency = c.origTrans end
@@ -345,13 +409,13 @@ local function refresh()
                 if part:FindFirstChildOfClass("Model") then
                     c.state = "flagged"
                 elseif c.painted then
-                    c.state = "unknown"                 -- стоит наша краска => ещё закрыта
+                    c.state = "unknown"
                 elseif isCoveredColor(part.Color) then
                     c.state = "unknown"
                 elseif c.truth == "mine" then
                     c.state = "unknown"
                 else
-                    c.state = "blank"                   -- открытая пустая клетка
+                    c.state = "blank"
                 end
                 if c.state == "unknown" or c.state == "flagged" then
                     Board.covered[#Board.covered + 1] = c
@@ -869,7 +933,7 @@ end
 
 local function makeTab(name, label, order)
     local b = new("TextButton", {
-        Name = name, Size = UDim2.new(1, -12, 0, 38), Position = UDim2.new(0, 12, 0, 12 + (order - 1) * 44),
+        Name = name, Size = UDim2.new(1, -12, 0, 38), Position = UDim2.new(0, 12, 0, 10 + (order - 1) * 42),
         BackgroundColor3 = THEME.panel, Text = label, Font = Enum.Font.GothamMedium,
         TextSize = 13, TextColor3 = THEME.sub, AutoButtonColor = false, BorderSizePixel = 0,
         TextXAlignment = Enum.TextXAlignment.Left,
@@ -1195,25 +1259,39 @@ end
 
 --====================== 6. НАПОЛНЕНИЕ ================================
 local tabMines  = makeTab("Mines", "МИНЫ", 1)
-local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 2)
-local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 3)
-local tabDebug  = makeTab("Debug", "ДЕБАГ", 4)
+local tabAuto   = makeTab("Auto", "АВТО", 2)
+local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 3)
+local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 4)
+local tabDebug  = makeTab("Debug", "ДЕБАГ", 5)
 
-addSection(tabMines, "РЕШАТЕЛЬ И ПОДСВЕТКА")
-addToggle(tabMines, "Показывать мины и риск", "showMines", function(v)
-    if not v then clearAllPaint() end
+addSection(tabMines, "МЕТКИ НА КЛЕТКАХ")
+addToggle(tabMines, "Показывать мины (метки)", "showMines", function(v)
+    if not v then clearAllMarkers(); clearAllPaint() end
 end)
-addToggle(tabMines, "Тепловая карта по всей доске", "heatmap")
-addSlider(tabMines, "Прозрачность подсветки", "paintTrans", 0, 0.9, 2)
-addToggle(tabMines, "Auto Flag (ставить флаги)", "autoFlag")
-addToggle(tabMines, "Auto Reveal (вскрывать безопасные)", "autoReveal")
-addButton(tabMines, "RAGE: вскрыть всю карту", function()
-    CFG.showMines, CFG.heatmap, CFG.autoFlag, CFG.autoReveal = true, true, true, true
+addToggle(tabMines, "Помечать догадки (полупрозрачно)", "markerGuess")
+addToggle(tabMines, "Метка лучшего хода", "markerBest")
+addSlider(tabMines, "Размер меток", "markerSize", 0.3, 2.0, 2)
+addSlider(tabMines, "Прозрачность меток", "markerTrans", 0, 0.9, 2)
+addSlider(tabMines, "Высота меток", "markerHeight", 0.4, 5.0, 1)
+addButton(tabMines, "Убрать метки", function() clearAllMarkers(); clearAllPaint() end)
+addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ точка = безопасно. Плотные — точный вывод логики, полупрозрачные — догадка (может ошибаться). Голубая = лучший ход. Открытые клетки меток не имеют.", 52)
+
+addSection(tabMines, "ДОПОЛНИТЕЛЬНО")
+addToggle(tabMines, "Тепловая карта (риск по всей доске)", "heatmap")
+addToggle(tabMines, "Красить клетки (старый режим)", "paintTiles")
+addButton(tabMines, "Сбросить подсветку", function()
+    clearAllMarkers(); clearAllPaint()
+end)
+
+addSection(tabAuto, "АВТОМАТИКА")
+addToggle(tabAuto, "Auto Flag (ставить флаги)", "autoFlag")
+addToggle(tabAuto, "Auto Reveal (вскрывать безопасные)", "autoReveal")
+addButton(tabAuto, "RAGE: вскрыть всю карту", function()
+    CFG.showMines, CFG.heatmap, CFG.markerGuess, CFG.autoFlag, CFG.autoReveal = true, true, true, true, true
     syncUI()
     notify("Rage-режим: карта вскрывается полностью")
 end, THEME.accent)
-addButton(tabMines, "Сбросить подсветку", clearAllPaint)
-addNote(tabMines, "Красный — мина (точно).  Зелёный — безопасно (точно).  Оранжевый — скорее мина.  Синий — скорее безопасно.  Голубой — лучший ход.  Прозрачность регулируется слайдером; уже открытые клетки не закрашиваются.", 58)
+addNote(tabAuto, "Rage прогоняет безопасные клетки телепортом и ставит флаги — доска очищается, все мины становятся точными (плотные красные точки без догадок).", 44)
 
 addSection(tabVisual, "КАМЕРА")
 addSlider(tabVisual, "FOV (поле зрения)", "fov", 50, 130, 0, applyFOV)
@@ -1268,7 +1346,7 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     print("===== END DEBUG =====")
 end)
 addButton(tabDebug, "Пересобрать доску", function() Board.lastCount = -1 end)
-addNote(tabDebug, "Дамп покажет, есть ли у клеток атрибуты/значения про мины — тогда режим в статусе станет «атрибуты» и мины будут точными сразу.", 40)
+addNote(tabDebug, "Если у клеток есть атрибуты/значения про мины — режим в статусе станет «атрибуты», и все метки будут точными без догадок.", 40)
 
 switchTab("Mines")
 
@@ -1280,11 +1358,11 @@ local function tick(t)
     if folder ~= Board.folder then
         Board.folder, Board.lastCount = folder, folder and #folder:GetChildren() or -1
         if folder then buildGrid(folder) end
-        clearAllPaint()
+        clearAllMarkers(); clearAllPaint()
     elseif folder and #folder:GetChildren() ~= Board.lastCount then
         Board.lastCount = #folder:GetChildren()
         buildGrid(folder)
-        clearAllPaint()
+        clearAllMarkers(); clearAllPaint()
     end
 
     if not Board.folder or #Board.cells == 0 then
@@ -1300,22 +1378,31 @@ local function tick(t)
         riskSet, bestGuess = computeRisk(mineSet, safeSet)
     end
 
-    if CFG.showMines then
-        for i = 1, #Board.covered do
-            local c = Board.covered[i]
-            local want
-            if mineSet[c] then want = "mine"
-            elseif safeSet[c] then want = "safe"
-            elseif CFG.heatmap and riskSet[c] then
-                want = (riskSet[c] >= 0.5) and "gmine" or "gsafe"
-            end
-            setPaint(c, want)
+    -- метки: красная = мина, синяя = безопасно (догадки полупрозрачные)
+    for i = 1, #Board.cells do
+        local c = Board.cells[i]
+        local kind, isGuess
+
+        if mineSet[c] then
+            kind = "mine"
+        elseif safeSet[c] then
+            kind = "safe"
+        elseif CFG.heatmap and CFG.markerGuess and riskSet[c] then
+            kind = (riskSet[c] >= 0.5) and "mine" or "safe"
+            isGuess = true
         end
-        if CFG.heatmap and bestGuess and bestGuess.part then
-            setPaint(bestGuess, "guess")
-        end
-    else
-        for i = 1, #Board.cells do setPaint(Board.cells[i], nil) end
+
+        c.markerGuess = isGuess and true or false
+
+        local wantM = (CFG.showMines and CFG.markers) and kind or nil
+        local wantP = (CFG.showMines and CFG.paintTiles) and kind or nil
+        setMarker(c, wantM)
+        setPaint(c, wantP)
+    end
+
+    if CFG.showMines and CFG.markers and CFG.markerBest and bestGuess and bestGuess.part then
+        bestGuess.markerGuess = false
+        setMarker(bestGuess, "best")
     end
 
     if CFG.autoFlag then autoFlag(mineSet) end
@@ -1370,7 +1457,9 @@ function VMS.destroy()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     conns = {}
 
+    pcall(clearAllMarkers)
     pcall(clearAllPaint)
+    pcall(function() if markerFolder then markerFolder:Destroy() end end)
     pcall(function()
         for part, o in pairs(flagOrig) do
             if part and part.Parent then
@@ -1396,5 +1485,5 @@ end
 
 --====================== 10. СТАРТ ====================================
 applyFOV()
-notify("Venice Hub 2.2 · Home = меню")
-print("[Venice Hub 2.2] загружен. Home — меню.")
+notify("Venice Hub 3.0 · Home = меню")
+print("[Venice Hub 3.0] загружен. Home — меню.")
