@@ -1,12 +1,14 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.2
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.3
       ------------------------------------------------------------------
       Меню     : Home   (все клавиши меняются: НАСТРОЙКИ -> КЛАВИШИ)
       Хоткеи   : G = догадки вкл/выкл, H = метки вкл/выкл, J = rage
       Мины     : метка-точка в центре клетки:
                    КРАСНАЯ = мина, СИНЯЯ = безопасно
                    точные — плотные, догадки — полупрозрачные
+                   ЦИАН = лучший ход (минимальный риск)
       Визуалы  : FOV, Fullbright, 6 пресетов неба, скины на флаг
+      Скин     : Korblox, Headless, жёсткая фиксация
       Игра     : roblox.com/games/7871169780
 =======================================================================]]
 
@@ -20,13 +22,15 @@ local UIS               = game:GetService("UserInputService")
 local Tween             = game:GetService("TweenService")
 local Lighting          = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local AssetService      = game:GetService("AssetService")
 local Workspace         = workspace
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "3.2" }
+local VMS = { version = "3.3" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -59,10 +63,13 @@ local CFG = {
     sky          = "Default",
     flagSkin     = "Default",
     skinHue      = 280,
-    keybind      = Enum.KeyCode.Home,   -- меню
-    keyGuess     = Enum.KeyCode.G,      -- догадки вкл/выкл
-    keyMarkers   = Enum.KeyCode.H,      -- метки вкл/выкл
-    keyRage      = Enum.KeyCode.J,      -- rage
+    cosKorblox   = true,
+    cosHeadless  = true,
+    cosForce     = true,
+    keybind      = Enum.KeyCode.Home,
+    keyGuess     = Enum.KeyCode.G,
+    keyMarkers   = Enum.KeyCode.H,
+    keyRage      = Enum.KeyCode.J,
     uiTrans      = 0,
 }
 
@@ -347,7 +354,7 @@ local function setMarker(cell, kind)
 
     local scale = 1
     if cell.markerGuess then scale = 0.8 end
-    if kind == "best" then scale = 1.2 end
+    if kind == "best" then scale = 1.25 end
     local size = CFG.markerSize * scale
     if math.abs(m.Size.X - size) > 0.01 then m.Size = Vector3.new(size, size, size) end
 
@@ -452,139 +459,295 @@ local function refresh()
     Board.truthMode = truthHits > 0 and "атрибуты" or "логика"
 end
 
-local function solve()
-    local mine, safe = {}, {}
-    local covered = Board.covered
+--=== РЕШАТЕЛЬ: точный перебор фронта с вероятностями =================
+local SOLVE_CAP = 4096
+local SOLVE_MAX_COMP = 26
 
-    for i = 1, #covered do
-        local c = covered[i]
-        if c.state == "flagged" or c.painted == "mine" or c.truth == "mine" then mine[c] = true end
-        if c.painted == "safe" or c.truth == "safe" then safe[c] = true end
-    end
-
-    local function constraint(c)
-        local unk, mines = {}, 0
-        for i = 1, #c.neigh do
-            local n = c.neigh[i]
-            if mine[n] then mines += 1
-            elseif not safe[n] and n.state == "unknown" then unk[#unk + 1] = n end
-        end
-        return unk, (c.number or 0) - mines
-    end
-
-    local numbers = Board.numbers
-    for _ = 1, 10 do
-        local changed = false
-
-        for i = 1, #numbers do
-            local unk, rem = constraint(numbers[i])
-            if #unk > 0 then
-                if rem <= 0 then
-                    for k = 1, #unk do
-                        if not safe[unk[k]] then safe[unk[k]] = true; changed = true end
-                    end
-                elseif rem >= #unk then
-                    for k = 1, #unk do
-                        if not mine[unk[k]] then mine[unk[k]] = true; changed = true end
-                    end
-                end
-            end
-        end
-
-        if not changed then
-            local cons = {}
-            for i = 1, #numbers do
-                local unk, rem = constraint(numbers[i])
-                if rem > 0 and rem <= #unk then
-                    local set = {}
-                    for k = 1, #unk do set[unk[k]] = true end
-                    cons[#cons + 1] = { c = numbers[i], set = set, rem = rem, n = #unk }
-                end
-            end
-            for i = 1, #cons do
-                local a = cons[i]
-                for j = i + 1, #cons do
-                    local b = cons[j]
-                    if math.abs(a.c.ix - b.c.ix) <= 2 and math.abs(a.c.iz - b.c.iz) <= 2 then
-                        local A, B = a, b
-                        if a.n > b.n then A, B = b, a end
-                        local sub = true
-                        for u in pairs(A.set) do
-                            if not B.set[u] then sub = false break end
-                        end
-                        if sub then
-                            local diff = B.rem - A.rem
-                            if diff >= 0 then
-                                local only = {}
-                                for u in pairs(B.set) do
-                                    if not A.set[u] then only[#only + 1] = u end
-                                end
-                                if #only > 0 then
-                                    if diff == 0 then
-                                        for k = 1, #only do
-                                            if not safe[only[k]] then safe[only[k]] = true; changed = true end
-                                        end
-                                    elseif diff == #only then
-                                        for k = 1, #only do
-                                            if not mine[only[k]] then mine[only[k]] = true; changed = true end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        if not changed then break end
-    end
-    return mine, safe
+local function comb(n, k)
+    if k < 0 or k > n then return 0 end
+    if k == 0 or k == n then return 1 end
+    if k > n - k then k = n - k end
+    local r = 1
+    for i = 1, k do r = r * (n - k + i) / i end
+    return r
 end
 
-local function computeRisk(mine, safe)
-    local risk = {}
-    local unknown, knownMines = 0, 0
-    for i = 1, #Board.covered do
-        local c = Board.covered[i]
-        if not mine[c] and not safe[c] then unknown += 1 end
-    end
-    for _ in pairs(mine) do knownMines += 1 end
-
-    local totalEst = math.max(knownMines, math.floor(#Board.cells * CFG.density))
-    local prior = unknown > 0 and math.clamp((totalEst - knownMines) / unknown, 0, 1) or CFG.density
-
-    local remOf, unkOf = {}, {}
-    for i = 1, #Board.numbers do
-        local n = Board.numbers[i]
+local function buildConstraints(mine, safe)
+    local cons, changed = {}, false
+    local numbers = Board.numbers
+    for i = 1, #numbers do
+        local n = numbers[i]
         local unk, m = {}, 0
         for k = 1, #n.neigh do
             local nb = n.neigh[k]
             if mine[nb] then m += 1
             elseif not safe[nb] and nb.state == "unknown" then unk[#unk + 1] = nb end
         end
-        remOf[n], unkOf[n] = (n.number or 0) - m, unk
-    end
-
-    local best, bestR
-    for i = 1, #Board.covered do
-        local c = Board.covered[i]
-        if not mine[c] and not safe[c] then
-            local sum, cnt = 0, 0
-            for k = 1, #c.neigh do
-                local n = c.neigh[k]
-                local u = unkOf[n]
-                if u and #u > 0 then
-                    sum += math.clamp((remOf[n] or 0) / #u, 0, 1)
-                    cnt += 1
+        local rem = (n.number or 0) - m
+        if #unk > 0 then
+            if rem <= 0 then
+                for k = 1, #unk do
+                    if not safe[unk[k]] then safe[unk[k]] = true; changed = true end
                 end
+            elseif rem >= #unk then
+                for k = 1, #unk do
+                    if not mine[unk[k]] then mine[unk[k]] = true; changed = true end
+                end
+            else
+                cons[#cons + 1] = { cells = unk, rem = rem }
             end
-            local r = cnt > 0 and (sum / cnt) or prior
-            risk[c] = r
-            if not bestR or r < bestR then best, bestR = c, r end
         end
     end
-    return risk, best
+    return cons, changed
+end
+
+local function enumerateCells(compCells, compCons, cons, cap)
+    local idx = {}
+    for i = 1, #compCells do idx[compCells[i]] = i end
+
+    local ccons = {}
+    for _, ci in ipairs(compCons) do
+        local c = cons[ci]
+        local ids = {}
+        for k = 1, #c.cells do ids[k] = idx[c.cells[k]] end
+        ccons[#ccons + 1] = { ids = ids, rem = c.rem }
+    end
+    table.sort(ccons, function(a, b) return #a.ids < #b.ids end)
+
+    local assign, sols, total = {}, {}, 0
+    local n = #compCells
+
+    local rec
+    rec = function(ci)
+        if total >= cap then return end
+        if ci > #ccons then
+            local sol = {}
+            for i = 1, n do sol[i] = assign[i] == true end
+            sols[#sols + 1] = sol
+            total += 1
+            return
+        end
+        local c = ccons[ci]
+        local free, known = {}, 0
+        for _, id in ipairs(c.ids) do
+            local a = assign[id]
+            if a == true then known += 1
+            elseif a == nil then free[#free + 1] = id end
+        end
+        local need = c.rem - known
+        local fn = #free
+        if need < 0 or need > fn then return end
+
+        if need == 0 then
+            for i = 1, fn do assign[free[i]] = false end
+            rec(ci + 1)
+            for i = 1, fn do assign[free[i]] = nil end
+        elseif need == fn then
+            for i = 1, fn do assign[free[i]] = true end
+            rec(ci + 1)
+            for i = 1, fn do assign[free[i]] = nil end
+        else
+            local pick = {}
+            local function choose(start, depth)
+                if total >= cap then return end
+                if depth > need then
+                    for i = 1, need do assign[pick[i]] = true end
+                    for i = 1, fn do
+                        if assign[free[i]] == nil then assign[free[i]] = false end
+                    end
+                    rec(ci + 1)
+                    for i = 1, fn do assign[free[i]] = nil end
+                    return
+                end
+                for i = start, fn - (need - depth) do
+                    pick[depth] = free[i]
+                    choose(i + 1, depth + 1)
+                    if total >= cap then return end
+                end
+            end
+            choose(1, 1)
+        end
+    end
+    rec(1)
+    return sols
+end
+
+local function solveBoard()
+    local mine, safe, risk = {}, {}, {}
+
+    local covered = Board.covered
+    for i = 1, #covered do
+        local c = covered[i]
+        if c.state == "flagged" or c.painted == "mine" or c.truth == "mine" then mine[c] = true end
+        if c.painted == "safe" or c.truth == "safe" then safe[c] = true end
+    end
+
+    local cons
+    for _ = 1, 15 do
+        local changed
+        cons, changed = buildConstraints(mine, safe)
+        if not changed then break end
+    end
+    cons = buildConstraints(mine, safe)
+
+    local unknownList, totalUnknown = {}, 0
+    for i = 1, #covered do
+        local c = covered[i]
+        if not mine[c] and not safe[c] then
+            totalUnknown += 1
+            unknownList[#unknownList + 1] = c
+        end
+    end
+    if totalUnknown == 0 then return mine, safe, risk, nil, 1 end
+
+    local knownMines = 0
+    for _ in pairs(mine) do knownMines += 1 end
+    local totalEst = math.max(knownMines, math.floor(#Board.cells * CFG.density))
+    local remaining = math.clamp(totalEst - knownMines, 0, totalUnknown)
+
+    local cellCons = {}
+    for ci = 1, #cons do
+        local cells = cons[ci].cells
+        for k = 1, #cells do
+            local t = cellCons[cells[k]]
+            if not t then t = {}; cellCons[cells[k]] = t end
+            t[#t + 1] = ci
+        end
+    end
+
+    local mineW, totW = {}, {}
+    local frontierExp = 0
+    local visited = {}
+
+    for i = 1, #unknownList do
+        local start = unknownList[i]
+        if not visited[start] and cellCons[start] then
+            visited[start] = true
+            local compCells, compCons, seenCons = {}, {}, {}
+            local queue, qh = { start }, 1
+            while qh <= #queue do
+                local cell = queue[qh]; qh += 1
+                compCells[#compCells + 1] = cell
+                local links = cellCons[cell]
+                if links then
+                    for _, ci in ipairs(links) do
+                        if not seenCons[ci] then
+                            seenCons[ci] = true
+                            compCons[#compCons + 1] = ci
+                            local cc = cons[ci].cells
+                            for k = 1, #cc do
+                                local nb = cc[k]
+                                if not visited[nb] then
+                                    visited[nb] = true
+                                    queue[#queue + 1] = nb
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            if #compCells <= SOLVE_MAX_COMP and #compCons > 0 then
+                local outside = totalUnknown - #compCells
+                local sols = enumerateCells(compCells, compCons, cons, SOLVE_CAP)
+                if #sols > 0 then
+                    local weights, wsum = {}, 0
+                    for si = 1, #sols do
+                        local sol = sols[si]
+                        local m = 0
+                        for k = 1, #sol do if sol[k] then m += 1 end end
+                        local need = remaining - m
+                        local w = 0
+                        if need >= 0 and need <= outside then w = comb(outside, need) end
+                        weights[si] = w
+                        wsum += w
+                    end
+                    if wsum <= 0 then
+                        for si = 1, #sols do weights[si] = 1 end
+                        wsum = #sols
+                    end
+                    for si = 1, #sols do
+                        local w = weights[si]
+                        if w > 0 then
+                            local sol = sols[si]
+                            local m = 0
+                            for k = 1, #sol do
+                                local cell = compCells[k]
+                                if sol[k] then
+                                    mineW[cell] = (mineW[cell] or 0) + w
+                                    m += 1
+                                end
+                                totW[cell] = (totW[cell] or 0) + w
+                            end
+                            frontierExp += w * m / wsum
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local outsideUnknown = 0
+    for i = 1, #unknownList do
+        local tw2 = totW[unknownList[i]]
+        if not tw2 or tw2 <= 0 then outsideUnknown += 1 end
+    end
+
+    local pOutside = 1
+    if outsideUnknown > 0 then
+        pOutside = math.clamp((remaining - frontierExp) / outsideUnknown, 0, 1)
+    end
+
+    for i = 1, #unknownList do
+        local c = unknownList[i]
+        local tw2 = totW[c]
+        local p
+        if tw2 and tw2 > 0 then p = mineW[c] / tw2 else p = pOutside end
+
+        if p <= 0.0001 then
+            safe[c] = true
+        elseif p >= 0.9999 then
+            mine[c] = true
+        else
+            risk[c] = p
+        end
+    end
+
+    for _ = 1, 8 do
+        local _, changed = buildConstraints(mine, safe)
+        if not changed then break end
+    end
+
+    local best, bestP = nil, 1
+    for i = 1, #unknownList do
+        local c = unknownList[i]
+        local p = risk[c]
+        if p and not mine[c] and not safe[c] then
+            if not best then
+                best, bestP = c, p
+            elseif p < bestP - 0.0001 then
+                best, bestP = c, p
+            elseif math.abs(p - bestP) <= 0.0001 and #(c.neigh or {}) > #(best.neigh or {}) then
+                best, bestP = c, p
+            end
+        end
+    end
+
+    return mine, safe, risk, best, bestP
+end
+
+local function signature()
+    local h = 7
+    local cells = Board.cells
+    for i = 1, #cells do
+        local c = cells[i]
+        local code = 5
+        if c.state == "number" then code = 10 + (c.number or 0)
+        elseif c.state == "flagged" then code = 3
+        elseif c.state == "unknown" then code = 4 end
+        h = (h * 131 + code * 7 + i) % 2147483647
+    end
+    return h
 end
 
 local lastFlag = 0
@@ -628,7 +791,260 @@ local function autoReveal(safe)
     end
 end
 
---====================== 4. ВИЗУАЛЫ ===================================
+--====================== 4. КОСМЕТИКА (korblox / headless) ============
+local COS_MESH = "rbxassetid://101851696"
+local COS_TEX  = "rbxassetid://101851254"
+local HIDE_ATTR = "VeniceOrigT"
+
+local hidingNow = false
+local hooked = setmetatable({}, { __mode = "k" })
+local cosFolder, meshCache
+
+local function getCosFolder()
+    if cosFolder and cosFolder.Parent then return cosFolder end
+    local f = Workspace:FindFirstChild("VeniceCosParts")
+    if not f then
+        f = new("Folder", { Name = "VeniceCosParts", Archivable = false }, Workspace)
+    end
+    cosFolder = f
+    return f
+end
+
+local function hookPart(p)
+    if hooked[p] then return end
+    hooked[p] = true
+    bind(p:GetPropertyChangedSignal("Transparency"):Connect(function()
+        if hidingNow or not CFG.cosHeadless then return end
+        if p.Transparency ~= 1 then
+            hidingNow = true
+            pcall(function() p.Transparency = 1 end)
+            hidingNow = false
+        end
+    end))
+end
+
+local function setHidden(inst, on)
+    if not inst then return end
+    if on then
+        if inst:GetAttribute(HIDE_ATTR) == nil then
+            pcall(function() inst:SetAttribute(HIDE_ATTR, inst.Transparency) end)
+        end
+        if inst.Transparency ~= 1 then
+            hidingNow = true
+            pcall(function() inst.Transparency = 1 end)
+            hidingNow = false
+        end
+    else
+        local o = inst:GetAttribute(HIDE_ATTR)
+        if o == nil then return end
+        hidingNow = true
+        pcall(function() inst.Transparency = o end)
+        hidingNow = false
+        pcall(function() inst:SetAttribute(HIDE_ATTR, nil) end)
+    end
+end
+
+local function headParts(char)
+    local head = char:FindFirstChild("Head")
+    if not head then return {} end
+    if head:IsA("BasePart") then return { head } end
+    local out = {}
+    for _, d in ipairs(head:GetDescendants()) do
+        if d:IsA("BasePart") then out[#out + 1] = d end
+    end
+    return out
+end
+
+local function headAccessories(char, parts)
+    local set = {}
+    for _, p in ipairs(parts) do set[p] = true end
+    local out = {}
+    for _, d in ipairs(char:GetChildren()) do
+        if d:IsA("Accessory") or d:IsA("Hat") then
+            local w = d:FindFirstChildWhichIsA("Weld", true)
+            if w and (set[w.Part0] or set[w.Part1]) then
+                out[#out + 1] = d
+            end
+        end
+    end
+    return out
+end
+
+local function applyHeadless(char, on)
+    if not char then return end
+    local parts = headParts(char)
+    if #parts == 0 then return end
+
+    for _, p in ipairs(parts) do
+        hookPart(p)
+        setHidden(p, on)
+        for _, d in ipairs(p:GetDescendants()) do
+            if d:IsA("Decal") then setHidden(d, on) end
+        end
+    end
+    for _, acc in ipairs(headAccessories(char, parts)) do
+        for _, d in ipairs(acc:GetDescendants()) do
+            if d:IsA("BasePart") then
+                hookPart(d)
+                setHidden(d, on)
+            elseif d:IsA("Decal") then
+                setHidden(d, on)
+            end
+        end
+    end
+end
+
+local function findLegParts(char)
+    local upper = char:FindFirstChild("RightUpperLeg") or char:FindFirstChild("Right Leg") or char:FindFirstChild("RightLeg")
+    if not upper then
+        for _, d in ipairs(char:GetChildren()) do
+            if d:IsA("BasePart") and d.Name:match("^Right.*[Uu]pper.*Leg$") then upper = d break end
+        end
+    end
+    if not upper then
+        for _, d in ipairs(char:GetChildren()) do
+            if d:IsA("BasePart") and d.Name:match("^Right.*Leg$") then upper = d break end
+        end
+    end
+    local lower = char:FindFirstChild("RightLowerLeg") or char:FindFirstChild("Right Lower Leg")
+    local foot  = char:FindFirstChild("RightFoot") or char:FindFirstChild("Right Foot")
+    return upper, lower, foot
+end
+
+local function findKorbloxPart(char)
+    if not cosFolder or not cosFolder.Parent then return nil end
+    for _, p in ipairs(cosFolder:GetChildren()) do
+        if p:IsA("BasePart") and p.Name == "VeniceKorbloxLeg" then
+            local w = p:FindFirstChildWhichIsA("WeldConstraint")
+            if w and w.Part1 and w.Part1:IsDescendantOf(char) then return p end
+        end
+    end
+    return nil
+end
+
+local function clearKorblox(char)
+    if not char then return end
+    local p = findKorbloxPart(char)
+    if p then pcall(function() p:Destroy() end) end
+    local upper, lower, foot = findLegParts(char)
+    setHidden(upper, false)
+    setHidden(lower, false)
+    setHidden(foot, false)
+end
+
+local function getMeshPart()
+    if meshCache and meshCache.Parent then return meshCache end
+    local ok, part = pcall(function()
+        return AssetService:CreateMeshPartAsync(COS_MESH, Enum.CollisionFidelity.Box)
+    end)
+    if ok and typeof(part) == "MeshPart" then
+        meshCache = part
+        return part
+    end
+    return nil
+end
+
+local function buildKorbloxLeg(char, upper, lower, foot)
+    local top = upper.CFrame * CFrame.new(0, upper.Size.Y / 2, 0)
+    local bottom
+    if foot and foot:IsA("BasePart") then
+        bottom = foot.CFrame * CFrame.new(0, -foot.Size.Y / 2, 0)
+    elseif lower and lower:IsA("BasePart") then
+        bottom = lower.CFrame * CFrame.new(0, -lower.Size.Y / 2, 0)
+    else
+        bottom = upper.CFrame * CFrame.new(0, -upper.Size.Y, 0)
+    end
+
+    local a, b = top.Position, bottom.Position
+    local delta = a - b
+    local len = math.clamp(delta.Magnitude, 0.5, 9)
+    local up = delta.Magnitude > 1e-3 and delta.Unit or Vector3.new(0, 1, 0)
+    local mid = (a + b) / 2
+    local w = math.clamp(math.max(upper.Size.X, upper.Size.Z) * 1.05, 0.3, 1.2)
+
+    local part = getMeshPart()
+    if part then
+        pcall(function()
+            part.TextureID = COS_TEX
+            part.MeshId = COS_MESH
+        end)
+        part.Name = "VeniceKorbloxLeg"
+    else
+        part = Instance.new("Part")
+        part.Name = "VeniceKorbloxLeg"
+        local sm = Instance.new("SpecialMesh", part)
+        sm.MeshType = Enum.MeshType.FileMesh
+        sm.MeshId = COS_MESH
+        sm.TextureId = COS_TEX
+    end
+
+    part.Size = Vector3.new(w, len, w)
+    part.CFrame = CFrame.lookAt(mid, mid + upper.CFrame.RightVector, up)
+    part.Anchored = false
+    part.CanCollide = false
+    part.CanQuery = false
+    part.CanTouch = false
+    part.CastShadow = true
+    pcall(function() part.Massless = true end)
+    part.TopSurface = Enum.SurfaceType.Smooth
+    part.BottomSurface = Enum.SurfaceType.Smooth
+    part.Parent = getCosFolder()
+
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = part
+    weld.Part1 = upper
+    weld.Parent = part
+
+    setHidden(upper, true)
+    setHidden(lower, true)
+    setHidden(foot, true)
+end
+
+local function applyKorblox(char, on)
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    if not on then clearKorblox(char) return end
+    if findKorbloxPart(char) then return end
+    local upper, lower, foot = findLegParts(char)
+    if not upper then return end
+    buildKorbloxLeg(char, upper, lower, foot)
+end
+
+local function enforceCos()
+    local char = LocalPlayer.Character
+    if not char then return end
+    if CFG.cosHeadless then pcall(applyHeadless, char, true) end
+    if CFG.cosKorblox then pcall(applyKorblox, char, true) end
+end
+
+local cosAcc = 0
+bind(RunService.RenderStepped:Connect(function(dt)
+    if not (CFG.cosHeadless or CFG.cosKorblox) then return end
+    if CFG.cosForce then
+        enforceCos()
+    else
+        cosAcc += dt
+        if cosAcc >= 0.15 then cosAcc = 0; enforceCos() end
+    end
+end))
+
+local function watchChar(char)
+    if not char then return end
+    meshCache = nil
+    enforceCos()
+    for _, d in ipairs({ 0.2, 0.6, 1.2 }) do task.delay(d, enforceCos) end
+    bind(char.DescendantAdded:Connect(function(d)
+        if d:IsA("BasePart") then hookPart(d) end
+        task.defer(enforceCos)
+    end))
+end
+
+if LocalPlayer.Character then watchChar(LocalPlayer.Character) end
+bind(LocalPlayer.CharacterAdded:Connect(watchChar))
+bind(LocalPlayer.CharacterAppearanceLoaded:Connect(enforceCos))
+
+--====================== 5. ВИЗУАЛЫ ===================================
 local savedFOV = Camera and Camera.FieldOfView or 70
 local function applyFOV()
     if Camera then Camera.FieldOfView = CFG.fov end
@@ -799,7 +1215,7 @@ local function applySkins(t)
     end
 end
 
---====================== 5. UI ========================================
+--====================== 6. UI ========================================
 local gui = new("ScreenGui", {
     Name = "VeniceMinesweeper", ResetOnSpawn = false, IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999,
@@ -1232,7 +1648,6 @@ local function addDropdown(page, text, key, options, cb)
     return f
 end
 
--- несколько строк биндов: помним, кто сейчас ждёт клавишу
 local awaitingKey, awaitingSetter = false, nil
 
 local function addKeybind(page, text, key, cb)
@@ -1290,12 +1705,13 @@ function notify(text)
     end)
 end
 
---====================== 6. НАПОЛНЕНИЕ ================================
+--====================== 7. НАПОЛНЕНИЕ ================================
 local tabMines  = makeTab("Mines", "МИНЫ", 1)
 local tabAuto   = makeTab("Auto", "АВТО", 2)
 local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 3)
-local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 4)
-local tabDebug  = makeTab("Debug", "ДЕБАГ", 5)
+local tabSkin   = makeTab("Skin", "СКИН", 4)
+local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 5)
+local tabDebug  = makeTab("Debug", "ДЕБАГ", 6)
 
 local function setRage(on)
     CFG.showMines, CFG.heatmap, CFG.markerGuess = true, true, true
@@ -1313,7 +1729,7 @@ addSlider(tabMines, "Размер меток", "markerSize", 0.3, 2.0, 2)
 addSlider(tabMines, "Прозрачность меток", "markerTrans", 0, 0.9, 2)
 addSlider(tabMines, "Высота меток", "markerHeight", 0.4, 5.0, 1)
 addButton(tabMines, "Убрать метки", function() clearAllMarkers(); clearAllPaint() end)
-addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ точка = безопасно. Плотные — точный вывод логики, полупрозрачные — догадка. Голубая = лучший ход.", 40)
+addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ = безопасно, ЦИАН = лучший ход с наименьшим риском. Плотные — точный вывод, полупрозрачные — вероятность. При 50/50 бот подскажет клетку с минимальным риском.", 46)
 
 addSection(tabMines, "ДОПОЛНИТЕЛЬНО")
 addToggle(tabMines, "Тепловая карта (риск по всей доске)", "heatmap")
@@ -1341,6 +1757,51 @@ addDropdown(tabVisual, "Скин флага", "flagSkin", {
 })
 addSlider(tabVisual, "Оттенок (Custom Hue)", "skinHue", 0, 360, 0)
 
+addSection(tabSkin, "ПЕРСОНАЖ")
+addToggle(tabSkin, "Korblox (нога)", "cosKorblox", function(v)
+    local char = LocalPlayer.Character
+    if v then
+        enforceCos()
+    elseif char then
+        pcall(clearKorblox, char)
+    end
+end)
+addToggle(tabSkin, "Headless (скрыть голову)", "cosHeadless", function(v)
+    local char = LocalPlayer.Character
+    if not char then return end
+    if v then
+        enforceCos()
+    else
+        for _, p in ipairs(headParts(char)) do setHidden(p, false) end
+        for _, acc in ipairs(headAccessories(char, headParts(char))) do
+            for _, d in ipairs(acc:GetDescendants()) do
+                if d:IsA("BasePart") or d:IsA("Decal") then setHidden(d, false) end
+            end
+        end
+    end
+end)
+addToggle(tabSkin, "Жёсткая фиксация", "cosForce")
+addButton(tabSkin, "Применить заново", function()
+    CFG.cosKorblox, CFG.cosHeadless = true, true
+    syncUI()
+    local char = LocalPlayer.Character
+    if char then
+        pcall(clearKorblox, char)
+    end
+    enforceCos()
+    notify("Скин применён")
+end, THEME.accent)
+addButton(tabSkin, "Снять всё", function()
+    CFG.cosKorblox, CFG.cosHeadless = false, false
+    syncUI()
+    local char = LocalPlayer.Character
+    if char then
+        pcall(clearKorblox, char)
+        for _, p in ipairs(headParts(char)) do setHidden(p, false) end
+    end
+end)
+addNote(tabSkin, "Korblox и Headless держатся на местном персонаже и переживают респавн. Headless скрывает голову и шляпы.", 34)
+
 addSection(tabSet, "КЛАВИШИ")
 addKeybind(tabSet, "Меню", "keybind", refreshHint)
 addKeybind(tabSet, "Догадки вкл/выкл", "keyGuess", refreshHint)
@@ -1351,7 +1812,9 @@ addSection(tabSet, "ПРОЧЕЕ")
 addSlider(tabSet, "Прозрачность окна", "uiTrans", 0, 1, 2, function(v)
     main.BackgroundTransparency = v
 end)
-addSlider(tabSet, "Плотность мин (приор)", "density", 0.05, 0.35, 2)
+addSlider(tabSet, "Плотность мин (приор)", "density", 0.05, 0.35, 2, function()
+    lastSig = -1
+end)
 addButton(tabSet, "Вернуть окно в центр", function()
     main.Position = UDim2.fromScale(0.5, 0.5)
 end)
@@ -1392,8 +1855,9 @@ addNote(tabDebug, "Если меток на карте заметно больш
 switchTab("Mines")
 refreshHint()
 
---====================== 7. ЦИКЛ ======================================
-local lastSolve, mineSet, safeSet, riskSet, bestGuess = 0, {}, {}, {}, nil
+--====================== 8. ЦИКЛ ======================================
+local lastSig = -1
+local mineSet, safeSet, riskSet, bestGuess, bestRisk = {}, {}, {}, nil, 1
 
 local function tick(t)
     local folder = findBoard()
@@ -1412,6 +1876,7 @@ local function tick(t)
         clearAllPaint()
         Board.folder = folder
         Board.lastCount = folder and #folder:GetChildren() or -1
+        lastSig = -1
         if folder then buildGrid(folder) end
     end
 
@@ -1422,15 +1887,15 @@ local function tick(t)
 
     refresh()
 
-    if (CFG.showMines or CFG.autoFlag or CFG.autoReveal) and t - lastSolve > 0.25 then
-        lastSolve = t
-        mineSet, safeSet = solve()
-        riskSet, bestGuess = computeRisk(mineSet, safeSet)
+    local sig = signature()
+    if sig ~= lastSig then
+        lastSig = sig
+        mineSet, safeSet, riskSet, bestGuess, bestRisk = solveBoard()
     end
 
     for i = 1, #Board.cells do
         local c = Board.cells[i]
-        local kind, isGuess
+        local kind, guess
 
         if mineSet[c] then
             kind = "mine"
@@ -1438,16 +1903,16 @@ local function tick(t)
             kind = "safe"
         elseif CFG.heatmap and CFG.markerGuess and riskSet[c] then
             kind = (riskSet[c] >= 0.5) and "mine" or "safe"
-            isGuess = true
+            guess = true
         end
 
-        c.markerGuess = isGuess and true or false
+        c.markerGuess = guess and true or false
 
         setMarker(c, (CFG.showMines and CFG.markers) and kind or nil)
         setPaint(c, (CFG.showMines and CFG.paintTiles) and kind or nil)
     end
 
-    if CFG.showMines and CFG.markers and CFG.markerBest and bestGuess and bestGuess.part then
+    if CFG.showMines and CFG.markers and CFG.markerBest and bestGuess and bestGuess.part and (bestRisk or 1) > 0.001 then
         bestGuess.markerGuess = false
         setMarker(bestGuess, "best")
     end
@@ -1465,25 +1930,30 @@ local function tick(t)
         local c = Board.covered[i]
         if not mineSet[c] and not safeSet[c] then unknown += 1 end
     end
-    statusbar.Text = ("Доска %dx%d  |  мины: %d  |  безопасно: %d  |  ?%d  |  режим: %s")
-        :format(Board.w, Board.h, mines, safe, unknown, Board.truthMode)
+
+    local hint = ""
+    if bestGuess and bestRisk and bestRisk < 0.999 then
+        hint = ("  |  лучший ход: %.0f%%"):format(bestRisk * 100)
+    end
+
+    statusbar.Text = ("Доска %dx%d  |  мины: %d  |  безопасно: %d  |  ?%d  |  режим: %s%s")
+        :format(Board.w, Board.h, mines, safe, unknown, Board.truthMode, hint)
 end
 
 task.spawn(function()
     local t = 0
     while alive do
-        t += 0.12
+        t += 0.05
         local ok, err = pcall(tick, t)
         if not ok then warnOnce("tick", tostring(err)) end
-        task.wait(0.12)
+        task.wait(0.05)
     end
 end)
 
---====================== 8. ВВОД ======================================
+--====================== 9. ВВОД ======================================
 bind(UIS.InputBegan:Connect(function(input, gp)
     if not alive then return end
 
-    -- сейчас переназначаем клавишу
     if awaitingKey then
         awaitingKey = false
         local setter = awaitingSetter
@@ -1519,7 +1989,7 @@ bind(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     applyFOV()
 end))
 
---====================== 9. ВЫГРУЗКА ==================================
+--====================== 10. ВЫГРУЗКА ================================
 function VMS.destroy()
     if not alive then return end
     alive = false
@@ -1529,6 +1999,16 @@ function VMS.destroy()
     pcall(clearAllMarkers)
     pcall(clearAllPaint)
     pcall(function() if markerFolder then markerFolder:Destroy() end end)
+
+    local char = LocalPlayer.Character
+    if char then
+        pcall(clearKorblox, char)
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") or d:IsA("Decal") then pcall(setHidden, d, false) end
+        end
+    end
+    pcall(function() if cosFolder then cosFolder:Destroy() end end)
+
     pcall(function()
         for part, o in pairs(flagOrig) do
             if part and part.Parent then
@@ -1552,8 +2032,9 @@ function VMS.destroy()
     print("[Venice Hub] выгружен")
 end
 
---====================== 10. СТАРТ ====================================
+--====================== 11. СТАРТ ====================================
 applyFOV()
 refreshHint()
-notify("Venice Hub 3.2 · Home = меню · G = догадки")
-print("[Venice Hub 3.2] загружен. Home — меню, G — догадки, H — метки, J — rage.")
+enforceCos()
+notify("Venice Hub 3.3 · Home = меню · G = догадки")
+print("[Venice Hub 3.3] загружен. Home — меню, G — догадки, H — метки, J — rage.")
