@@ -1,5 +1,5 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.4
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.5
       ------------------------------------------------------------------
       Меню     : Home   (все клавиши меняются: НАСТРОЙКИ -> КЛАВИШИ)
       Хоткеи   : G = догадки вкл/выкл, H = метки вкл/выкл, J = rage
@@ -8,7 +8,7 @@
                    точные — плотные, догадки — полупрозрачные
                    ЦИАН = лучший ход (минимальный риск)
       Визуалы  : FOV, Fullbright, 6 пресетов неба, скины на флаг
-      Скин     : Korblox, Headless, жёсткая фиксация
+      Буст     : тени, партиклы, качество рендера, fps cap
       Игра     : roblox.com/games/7871169780
 =======================================================================]]
 
@@ -23,14 +23,13 @@ local Tween             = game:GetService("TweenService")
 local Lighting          = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
-local AssetService      = game:GetService("AssetService")
 local Workspace         = workspace
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "3.4" }
+local VMS = { version = "3.5" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -50,7 +49,7 @@ local CFG = {
     markers      = true,
     markerGuess  = true,
     markerBest   = true,
-    markerExact  = false,   -- только точные выводы, без вероятностей
+    markerExact  = false,
     paintTiles   = false,
     heatmap      = true,
     markerSize   = 1.2,
@@ -64,9 +63,11 @@ local CFG = {
     sky          = "Default",
     flagSkin     = "Default",
     skinHue      = 280,
-    cosKorblox   = true,
-    cosHeadless  = true,
-    cosForce     = true,
+    boost        = false,
+    boostParts   = true,
+    boostShadow  = true,
+    boostQuality = true,
+    boostCap     = true,
     keybind      = Enum.KeyCode.Home,
     keyGuess     = Enum.KeyCode.G,
     keyMarkers   = Enum.KeyCode.H,
@@ -118,13 +119,13 @@ end
 --====================== 3. ЛОГИКА ДОСКИ ==============================
 local Board = {
     folder = nil, cells = {}, covered = {}, numbers = {},
-    w = 0, h = 0, lastCount = -1, truthMode = "логика", coverColor = nil, sp = 5,
+    w = 0, h = 0, lastCount = -1, truthMode = "логика",
+    palette = nil, matPalette = nil, sp = 5,
 }
 
 local PAINTS = {
     mine  = Color3.fromRGB(255, 45, 45),
     safe  = Color3.fromRGB(0, 255, 110),
-    best  = Color3.fromRGB(0, 255, 255),
 }
 
 local MARKER_COLORS = {
@@ -195,23 +196,35 @@ local function nearest(list, v)
     return best
 end
 
---=== ЧТЕНИЕ ЧИСЛА (устойчивое) =======================================
+--=== ЧТЕНИЕ ЧИСЛА ====================================================
+local function labelText(lbl)
+    if not lbl.Visible then return nil end
+    local n = tonumber(lbl.Text)
+    if n and n >= 0 and n <= 8 then return n end
+    return nil
+end
+
+local function guiEnabled(gui)
+    if gui:IsA("LayerCollector") then return gui.Enabled end
+    return true
+end
+
 local function numberAt(part)
     local gui = part:FindFirstChild("NumberGui")
-    if gui then
+    if gui and guiEnabled(gui) then
         local lbl = gui:FindFirstChild("TextLabel", true)
-        local n = lbl and tonumber(lbl.Text)
+        local n = lbl and labelText(lbl)
         if n then return n end
         for _, d in ipairs(gui:GetDescendants()) do
             if d:IsA("TextLabel") then
-                local v = tonumber(d.Text)
+                local v = labelText(d)
                 if v then return v end
             end
         end
     end
     for _, d in ipairs(part:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextButton") then
-            local v = tonumber(d.Text)
+        if d:IsA("TextLabel") and d.Visible then
+            local v = labelText(d)
             if v then return v end
         end
     end
@@ -244,20 +257,46 @@ end
 
 local function hasFlag(part)
     for _, ch in ipairs(part:GetChildren()) do
-        if ch:IsA("Model") or string.lower(ch.Name):find("flag") then return true end
+        if ch:IsA("Model") then return true end
+        if ch:IsA("BasePart") and string.lower(ch.Name):find("flag") then return true end
     end
     return false
 end
 
 local function isGreen(col)
-    return col.G > col.R + 0.03 and col.G > col.B + 0.03 and col.G > 0.18
+    return col.G > col.R + 0.03 and col.G > col.B + 0.03 and col.G > col.G * 0 + 0.18
 end
 
-local function isCoveredColor(col)
+local function colorKey(c)
+    return ("%d_%d_%d"):format(math.floor(c.R * 20), math.floor(c.G * 20), math.floor(c.B * 20))
+end
+
+--=== ПАЛИТРА ЗАКРЫТЫХ КЛЕТОК =========================================
+-- снимается ОДИН раз со свежей доски: тени и градиенты попадают в палитру,
+-- открытые клетки в неё не попадают никогда
+local function capturePalette(parts)
+    local col, mat = {}, {}
+    for i = 1, #parts do
+        local p = parts[i]
+        if not numberAt(p) and not hasFlag(p) then
+            col[colorKey(p.Color)] = true
+            mat[p.Material.Name] = true
+        end
+    end
+    local cn = 0
+    for _ in pairs(col) do cn += 1 end
+    if cn > 0 then
+        Board.palette = col
+        Board.matPalette = mat
+    end
+end
+
+local function isCoveredColor(col, mat)
     if isGreen(col) then return true end
-    local cc = Board.coverColor
-    if cc and colorClose(col, cc, 0.09) then return true end
-    return false
+    if not Board.palette then return true end
+    if not Board.palette[colorKey(col)] then return false end
+    if mat and Board.matPalette and not Board.matPalette[mat.Name] then return false end
+    return true
 end
 
 local function buildGrid(folder)
@@ -267,23 +306,7 @@ local function buildGrid(folder)
     end
     if #parts < 4 then Board.cells, Board.w, Board.h = {}, 0, 0; return end
 
-    -- цвет закрытой клетки считается ОДИН раз на доску и фиксируется
-    if not Board.coverColor then
-        local counts, sample = {}, {}
-        for i = 1, #parts do
-            local p = parts[i]
-            if not numberAt(p) and not hasFlag(p) then
-                local key = ("%d_%d_%d"):format(math.floor(p.Color.R * 16), math.floor(p.Color.G * 16), math.floor(p.Color.B * 16))
-                counts[key] = (counts[key] or 0) + 1
-                sample[key] = p.Color
-            end
-        end
-        local bk, bn = nil, 0
-        for k, n in pairs(counts) do
-            if n > bn then bk, bn = k, n end
-        end
-        if bk and bn >= 3 then Board.coverColor = sample[bk] end
-    end
+    if not Board.palette then capturePalette(parts) end
 
     local xs, zs, sumY = {}, {}, 0
     for i = 1, #parts do
@@ -476,11 +499,7 @@ local function refresh()
                     c.state = "flagged"
                 elseif c.painted then
                     c.state = "unknown"
-                elseif Board.coverColor and colorClose(part.Color, Board.coverColor, 0.09) then
-                    c.state = "unknown"
-                elseif isGreen(part.Color) then
-                    c.state = "unknown"
-                elseif not Board.coverColor and c.truth == "mine" then
+                elseif isCoveredColor(part.Color, part.Material) then
                     c.state = "unknown"
                 else
                     c.state = "blank"
@@ -829,316 +848,102 @@ local function autoReveal(safe)
     end
 end
 
---====================== 4. КОСМЕТИКА ================================
-local COS_MESH = "rbxassetid://101851696"
-local COS_TEX  = "rbxassetid://101851254"
-local HIDE_ATTR = "VeniceOrigT"
+--====================== 4. БУСТ FPS ==================================
+local Boost = { saved = setmetatable({}, { __mode = "k" }), lighting = nil, quality = nil }
 
-local hidingNow = false
-local hooked = setmetatable({}, { __mode = "k" })
-local cosFolder, meshCache
-local building, lastBuildTry = false, 0
+local BOOST_KINDS = {
+    "ParticleEmitter", "Sparkles", "Smoke", "Fire", "Beam", "Trail",
+    "PointLight", "SpotLight", "SurfaceLight",
+}
 
-local function getCosFolder()
-    if cosFolder and cosFolder.Parent then return cosFolder end
-    local f = Workspace:FindFirstChild("VeniceCosParts")
-    if not f then
-        f = new("Folder", { Name = "VeniceCosParts", Archivable = false }, Workspace)
-    end
-    cosFolder = f
-    return f
-end
-
-local function hookPart(p)
-    if hooked[p] then return end
-    hooked[p] = true
-    bind(p:GetPropertyChangedSignal("Transparency"):Connect(function()
-        if hidingNow or not CFG.cosHeadless then return end
-        if p.Transparency ~= 1 then
-            hidingNow = true
-            pcall(function() p.Transparency = 1 end)
-            hidingNow = false
-        end
-    end))
-end
-
-local function setHidden(inst, on)
-    if not inst then return end
-    if on then
-        if inst:GetAttribute(HIDE_ATTR) == nil then
-            pcall(function() inst:SetAttribute(HIDE_ATTR, inst.Transparency) end)
-        end
-        if inst.Transparency ~= 1 then
-            hidingNow = true
-            pcall(function() inst.Transparency = 1 end)
-            hidingNow = false
-        end
-    else
-        local o = inst:GetAttribute(HIDE_ATTR)
-        if o == nil then return end
-        hidingNow = true
-        pcall(function() inst.Transparency = o end)
-        hidingNow = false
-        pcall(function() inst:SetAttribute(HIDE_ATTR, nil) end)
+local function boostKill(list)
+    for _, d in ipairs(list) do
+        if Boost.saved[d] == nil then Boost.saved[d] = d.Enabled end
+        pcall(function() d.Enabled = false end)
     end
 end
 
-local function headParts(char)
-    local head = char:FindFirstChild("Head")
-    if not head then return {} end
-    if head:IsA("BasePart") then return { head } end
-    local out = {}
-    for _, d in ipairs(head:GetDescendants()) do
-        if d:IsA("BasePart") then out[#out + 1] = d end
-    end
-    return out
-end
-
-local function headAccessories(char, parts)
-    local set = {}
-    for _, p in ipairs(parts) do set[p] = true end
-    local out = {}
-    for _, d in ipairs(char:GetChildren()) do
-        if d:IsA("Accessory") or d:IsA("Hat") then
-            local w = d:FindFirstChildWhichIsA("Weld", true)
-            if w and (set[w.Part0] or set[w.Part1]) then
-                out[#out + 1] = d
+local function boostParts(root)
+    local parts, fx = {}, {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") then
+            parts[#parts + 1] = d
+        else
+            for _, k in ipairs(BOOST_KINDS) do
+                if d:IsA(k) then fx[#fx + 1] = d break end
             end
         end
     end
-    return out
-end
-
-local function applyHeadless(char, on)
-    if not char then return end
-    local parts = headParts(char)
-    if #parts == 0 then return end
-
     for _, p in ipairs(parts) do
-        hookPart(p)
-        setHidden(p, on)
-        for _, d in ipairs(p:GetDescendants()) do
-            if d:IsA("Decal") then setHidden(d, on) end
+        if Boost.saved[p] == nil then Boost.saved[p] = p.CastShadow end
+        if p.CastShadow then pcall(function() p.CastShadow = false end) end
+    end
+    boostKill(fx)
+end
+
+local function applyBoost()
+    if not CFG.boost then return end
+
+    if CFG.boostShadow and not Boost.lighting then
+        Boost.lighting = {
+            gs = Lighting.GlobalShadows, ss = Lighting.ShadowSoftness,
+            eds = Lighting.EnvironmentDiffuseScale, ess = Lighting.EnvironmentSpecularScale,
+            fog = Lighting.FogEnd,
+        }
+        Lighting.GlobalShadows = false
+        Lighting.ShadowSoftness = 0
+        Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0
+    end
+
+    if CFG.boostQuality and not Boost.quality then
+        Boost.quality = true
+        pcall(function() Boost.quality = settings().Rendering.QualityLevel end)
+        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    end
+
+    if CFG.boostCap then
+        pcall(function() setfpscap(240) end)
+    end
+
+    if CFG.boostParts then boostParts(Workspace) end
+end
+
+local function clearBoost()
+    if Boost.lighting then
+        local l = Boost.lighting
+        Lighting.GlobalShadows = l.gs
+        Lighting.ShadowSoftness = l.ss
+        Lighting.EnvironmentDiffuseScale = l.eds
+        Lighting.EnvironmentSpecularScale = l.ess
+        Boost.lighting = nil
+    end
+    if Boost.quality then
+        local q = Boost.quality
+        Boost.quality = nil
+        if typeof(q) == "EnumItem" then
+            pcall(function() settings().Rendering.QualityLevel = q end)
         end
     end
-    for _, acc in ipairs(headAccessories(char, parts)) do
-        for _, d in ipairs(acc:GetDescendants()) do
-            if d:IsA("BasePart") then
-                hookPart(d)
-                setHidden(d, on)
-            elseif d:IsA("Decal") then
-                setHidden(d, on)
+    if CFG.boostCap then pcall(function() setfpscap(60) end) end
+
+    for inst, v in pairs(Boost.saved) do
+        if inst and inst.Parent then
+            if type(v) == "boolean" then
+                pcall(function() inst.CastShadow = v end)
+            else
+                pcall(function() inst.Enabled = v end)
             end
         end
     end
+    Boost.saved = setmetatable({}, { __mode = "k" })
 end
 
-local function findLegParts(char)
-    local upper = char:FindFirstChild("RightUpperLeg") or char:FindFirstChild("Right Leg") or char:FindFirstChild("RightLeg")
-    if not upper then
-        for _, d in ipairs(char:GetChildren()) do
-            if d:IsA("BasePart") and d.Name:match("^Right.*[Uu]pper.*Leg$") then upper = d break end
-        end
-    end
-    if not upper then
-        for _, d in ipairs(char:GetChildren()) do
-            if d:IsA("BasePart") and d.Name:match("^Right.*Leg$") then upper = d break end
-        end
-    end
-    local lower = char:FindFirstChild("RightLowerLeg") or char:FindFirstChild("Right Lower Leg")
-    local foot  = char:FindFirstChild("RightFoot") or char:FindFirstChild("Right Foot")
-    return upper, lower, foot
-end
-
-local function findKorbloxPart(char)
-    if not cosFolder or not cosFolder.Parent then return nil end
-    for _, p in ipairs(cosFolder:GetChildren()) do
-        if p:IsA("BasePart") and p.Name == "VeniceKorbloxLeg" then
-            local w = p:FindFirstChildWhichIsA("Weld")
-                or p:FindFirstChildWhichIsA("WeldConstraint")
-            if w and w.Part1 and w.Part1:IsDescendantOf(char) then return p end
-        end
-    end
-    return nil
-end
-
-local function clearKorblox(char)
-    if cosFolder then
-        for _, p in ipairs(cosFolder:GetChildren()) do
-            if p.Name == "VeniceKorbloxLeg" then pcall(function() p:Destroy() end) end
-        end
-    end
-    if not char then return end
-    local upper, lower, foot = findLegParts(char)
-    setHidden(upper, false)
-    setHidden(lower, false)
-    setHidden(foot, false)
-end
-
-local function getMeshPart()
-    if meshCache and meshCache.Parent then return meshCache end
-    local ok, part = pcall(function()
-        return AssetService:CreateMeshPartAsync(COS_MESH, Enum.CollisionFidelity.Box)
-    end)
-    if ok and typeof(part) == "MeshPart" then
-        meshCache = part
-        return part
-    end
-    return nil
-end
-
-local function hipOf(upper)
-    return upper.CFrame * CFrame.new(0, upper.Size.Y / 2, 0)
-end
-
--- строим ногу АСИНХРОННО: меш грузится с yield, CFrame считается ПОСЛЕ загрузки
-local function buildKorbloxLeg(char)
-    if building then return end
-    if not char or not char.Parent then return end
-    if findKorbloxPart(char) then return end
-
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return end
-    local upper, lower, foot = findLegParts(char)
-    if not upper then return end
-
-    building = true
-    local part = getMeshPart()
-
-    if not char.Parent or not upper.Parent or findKorbloxPart(char) then
-        building = false
-        return
-    end
-
-    -- пересчёт уже после yield, по актуальной позе
-    local top = hipOf(upper)
-    local bottom
-    if foot and foot:IsA("BasePart") then
-        bottom = foot.CFrame * CFrame.new(0, -foot.Size.Y / 2, 0)
-    elseif lower and lower:IsA("BasePart") then
-        bottom = lower.CFrame * CFrame.new(0, -lower.Size.Y / 2, 0)
-    else
-        bottom = top * CFrame.new(0, -(upper.Size.Y + 1), 0)
-    end
-
-    local delta = top.Position - bottom.Position
-    local len = math.clamp(delta.Magnitude, 0.6, 12)
-    local mid = (top.Position + bottom.Position) / 2
-    local w = math.clamp(math.max(upper.Size.X, upper.Size.Z) * 1.05, 0.25, 1.4)
-
-    if part then
-        pcall(function()
-            part.TextureID = COS_TEX
-            part.MeshId = COS_MESH
-        end)
-        part.Name = "VeniceKorbloxLeg"
-    else
-        part = Instance.new("Part")
-        part.Name = "VeniceKorbloxLeg"
-        local sm = Instance.new("SpecialMesh", part)
-        sm.MeshType = Enum.MeshType.FileMesh
-        sm.MeshId = COS_MESH
-        sm.TextureId = COS_TEX
-        sm.Scale = Vector3.new(w, len / 2, w)
-    end
-
-    -- ориентация берётся у бедра: меш идёт вдоль ноги, следует анимации
-    local rot = upper.CFrame - upper.CFrame.Position
-    local target = CFrame.new(mid) * rot
-
-    part.Size = Vector3.new(w, len, w)
-    part.CFrame = target
-    part.Anchored = false
-    part.CanCollide = false
-    part.CanQuery = false
-    part.CanTouch = false
-    part.CastShadow = true
-    pcall(function() part.Massless = true end)
-    part.TopSurface = Enum.SurfaceType.Smooth
-    part.BottomSurface = Enum.SurfaceType.Smooth
-    part.Parent = getCosFolder()
-
-    -- Weld с C0 в локальных координатах бедра: жёстко, без дрейфа
-    local weld = Instance.new("Weld")
-    weld.Part0 = upper
-    weld.Part1 = part
-    weld.C0 = upper.CFrame:ToObjectSpace(target)
-    weld.C1 = CFrame.new()
-    weld.Parent = part
-
-    setHidden(upper, true)
-    setHidden(lower, true)
-    setHidden(foot, true)
-
-    building = false
-end
-
-local function korbloxValid(char)
-    local p = findKorbloxPart(char)
-    if not p then return false end
-    local upper = findLegParts(char)
-    if not upper then return false end
-    local topNow = (p.CFrame * CFrame.new(0, p.Size.Y / 2, 0)).Position
-    return (topNow - hipOf(upper).Position).Magnitude < 1.6
-end
-
-local function enforceCos()
-    local char = LocalPlayer.Character
-    if not char then return end
-    if CFG.cosHeadless then pcall(applyHeadless, char, true) end
-    if CFG.cosKorblox and not building then
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
-            if not korbloxValid(char) then
-                local now = os.clock()
-                if now - lastBuildTry > 0.4 then
-                    lastBuildTry = now
-                    local p = findKorbloxPart(char)
-                    if p then pcall(function() p:Destroy() end) end
-                    task.spawn(function() pcall(buildKorbloxLeg, char) end)
-                end
-            end
-        end
-    end
-end
-
-local cosAcc = 0
-bind(RunService.RenderStepped:Connect(function(dt)
-    if not (CFG.cosHeadless or CFG.cosKorblox) then return end
-    if CFG.cosForce then
-        enforceCos()
-    else
-        cosAcc += dt
-        if cosAcc >= 0.15 then cosAcc = 0; enforceCos() end
-    end
-end))
-
-local function watchChar(char)
-    if not char then return end
-    meshCache = nil
-    building, lastBuildTry = false, 0
-    if cosFolder then
-        for _, p in ipairs(cosFolder:GetChildren()) do
-            if p.Name == "VeniceKorbloxLeg" then pcall(function() p:Destroy() end) end
-        end
-    end
-    for _, d in ipairs({ 0.3, 0.8, 1.5 }) do task.delay(d, enforceCos) end
-    bind(char.DescendantAdded:Connect(function(d)
-        if d:IsA("BasePart") then hookPart(d) end
-        task.defer(enforceCos)
-    end))
-end
-
-if LocalPlayer.Character then watchChar(LocalPlayer.Character) end
-bind(LocalPlayer.CharacterAdded:Connect(watchChar))
-bind(LocalPlayer.CharacterRemoving:Connect(function(char) pcall(clearKorblox, char) end))
-bind(LocalPlayer.CharacterAppearanceLoaded:Connect(function(char)
-    task.delay(0.1, function()
-        building = false
-        local p = findKorbloxPart(char)
-        if p then pcall(function() p:Destroy() end) end
-        enforceCos()
-    end)
+local boostAcc = 0
+bind(RunService.Heartbeat:Connect(function(dt)
+    if not CFG.boost then return end
+    boostAcc += dt
+    if boostAcc >= 2 then boostAcc = 0; applyBoost() end
 end))
 
 --====================== 5. ВИЗУАЛЫ ===================================
@@ -1297,9 +1102,11 @@ local function applySkins(t)
         local part = cells[i].part
         if part and part.Parent then
             for _, ch in ipairs(part:GetChildren()) do
-                local model = ch:IsA("Model") and ch or (ch:IsA("BasePart") and ch or nil)
-                if model then
-                    local list = model:IsA("Model") and model:GetDescendants() or { model }
+                local list
+                if ch:IsA("Model") then list = ch:GetDescendants()
+                elseif ch:IsA("BasePart") then list = { ch }
+                end
+                if list then
                     for _, p in ipairs(list) do
                         if p:IsA("BasePart") then
                             if not flagOrig[p] then
@@ -1809,7 +1616,7 @@ end
 local tabMines  = makeTab("Mines", "МИНЫ", 1)
 local tabAuto   = makeTab("Auto", "АВТО", 2)
 local tabVisual = makeTab("Visual", "ВИЗУАЛЫ", 3)
-local tabSkin   = makeTab("Skin", "СКИН", 4)
+local tabBoost  = makeTab("Boost", "БУСТ", 4)
 local tabSet    = makeTab("Settings", "НАСТРОЙКИ", 5)
 local tabDebug  = makeTab("Debug", "ДЕБАГ", 6)
 
@@ -1830,7 +1637,7 @@ addSlider(tabMines, "Размер меток", "markerSize", 0.3, 2.5, 2)
 addSlider(tabMines, "Прозрачность меток", "markerTrans", 0, 0.9, 2)
 addSlider(tabMines, "Высота меток", "markerHeight", 0.1, 5.0, 1)
 addButton(tabMines, "Убрать метки", function() clearAllMarkers(); clearAllPaint() end)
-addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ = безопасно, ЦИАН = лучший ход с наименьшим риском. Метки ставятся ТОЛЬКО на закрытые клетки. Плотные — точный вывод, полупрозрачные — вероятность.", 46)
+addNote(tabMines, "КРАСНАЯ = мина, СИНЯЯ = безопасно, ЦИАН = лучший ход. Метки только на закрытых клетках. Плотные — точный вывод, полупрозрачные — вероятность.", 46)
 
 addSection(tabMines, "ДОПОЛНИТЕЛЬНО")
 addToggle(tabMines, "Тепловая карта (риск по всей доске)", "heatmap")
@@ -1858,50 +1665,27 @@ addDropdown(tabVisual, "Скин флага", "flagSkin", {
 })
 addSlider(tabVisual, "Оттенок (Custom Hue)", "skinHue", 0, 360, 0)
 
-addSection(tabSkin, "ПЕРСОНАЖ")
-addToggle(tabSkin, "Korblox (нога)", "cosKorblox", function(v)
-    local char = LocalPlayer.Character
+addSection(tabBoost, "ПРОИЗВОДИТЕЛЬНОСТЬ")
+addToggle(tabBoost, "FPS BOOST (мастер)", "boost", function(v)
     if v then
-        building, lastBuildTry = false, 0
-        enforceCos()
-    elseif char then
-        pcall(clearKorblox, char)
-    end
-end)
-addToggle(tabSkin, "Headless (скрыть голову)", "cosHeadless", function(v)
-    local char = LocalPlayer.Character
-    if not char then return end
-    if v then
-        enforceCos()
+        applyBoost()
+        notify("FPS Boost: ВКЛ")
     else
-        for _, p in ipairs(headParts(char)) do setHidden(p, false) end
-        for _, acc in ipairs(headAccessories(char, headParts(char))) do
-            for _, d in ipairs(acc:GetDescendants()) do
-                if d:IsA("BasePart") or d:IsA("Decal") then setHidden(d, false) end
-            end
-        end
+        clearBoost()
+        notify("FPS Boost: ВЫКЛ")
     end
 end)
-addToggle(tabSkin, "Жёсткая фиксация", "cosForce")
-addButton(tabSkin, "Применить заново", function()
-    CFG.cosKorblox, CFG.cosHeadless = true, true
-    syncUI()
-    building, lastBuildTry = false, 0
-    local char = LocalPlayer.Character
-    if char then pcall(clearKorblox, char) end
-    enforceCos()
-    notify("Скин применён")
+addToggle(tabBoost, "Убрать тени у объектов", "boostShadow", applyBoost)
+addToggle(tabBoost, "Убрать партиклы и источники света", "boostParts", applyBoost)
+addToggle(tabBoost, "Минимальное качество рендера", "boostQuality", applyBoost)
+addToggle(tabBoost, "Поднять fps cap", "boostCap", applyBoost)
+addButton(tabBoost, "Применить заново", function()
+    Boost.saved = setmetatable({}, { __mode = "k" })
+    Boost.lighting, Boost.quality = nil, nil
+    applyBoost()
+    notify("Буст применён")
 end, THEME.accent)
-addButton(tabSkin, "Снять всё", function()
-    CFG.cosKorblox, CFG.cosHeadless = false, false
-    syncUI()
-    local char = LocalPlayer.Character
-    if char then
-        pcall(clearKorblox, char)
-        for _, p in ipairs(headParts(char)) do setHidden(p, false) end
-    end
-end)
-addNote(tabSkin, "Нога приваривается к бедру в локальных координатах и следует за анимацией. При отрыве пересобирается автоматически, сносится при смерти.", 34)
+addNote(tabBoost, "Снимает тени, глушит партиклы/спарклы, ставит низкое качество и высокий fps cap. Всё возвращается при выключении или выгрузке скрипта.", 46)
 
 addSection(tabSet, "КЛАВИШИ")
 addKeybind(tabSet, "Меню", "keybind", refreshHint)
@@ -1926,16 +1710,18 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     local folder = Board.folder
     print("===== VENICE HUB DEBUG =====")
     print("Доска:", folder and folder:GetFullName() or "НЕ НАЙДЕНА")
-    print("Цвет закрытой клетки (фикс):", tostring(Board.coverColor))
+    local pn = 0
+    for _ in pairs(Board.palette or {}) do pn += 1 end
+    print("Цветов в палитре закрытых:", pn)
     print("Клеток:", #Board.cells, "| сетка:", Board.w .. "x" .. Board.h)
     print("Закрытых:", #Board.covered, "| чисел найдено:", #Board.numbers)
     print("Меток на карте:", #markerFolder:GetChildren())
     if folder then
         local kids = folder:GetChildren()
-        for i = 1, math.min(3, #kids) do
+        for i = 1, math.min(4, #kids) do
             local p = kids[i]
-            print(("-- %s [%s] Color=%s BrickColor=%s num=%s"):format(p:GetFullName(), p.ClassName,
-                tostring(p.Color), p.BrickColor.Name, tostring(numberAt(p))))
+            print(("-- %s [%s] Color=%s Mat=%s num=%s"):format(p:GetFullName(), p.ClassName,
+                tostring(p.Color), p.Material.Name, tostring(numberAt(p))))
             for _, ch in ipairs(p:GetChildren()) do
                 print("   child:", ch.ClassName, ch.Name,
                     ch:IsA("ValueBase") and tostring(ch.Value) or "")
@@ -1945,18 +1731,14 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
             end
         end
     end
-    print("--- ReplicatedStorage ---")
-    for _, o in ipairs(ReplicatedStorage:GetChildren()) do print("RS:", o.ClassName, o.Name) end
-    print("--- Workspace ---")
-    for _, o in ipairs(Workspace:GetChildren()) do print("WS:", o.ClassName, o.Name) end
     print("===== END DEBUG =====")
 end)
-addButton(tabDebug, "Пересобрать доску", function()
+addButton(tabDebug, "Пересобрать доску + переснять палитру", function()
     Board.lastCount = -1
-    Board.coverColor = nil
+    Board.palette, Board.matPalette = nil, nil
     lastSig = -1
 end)
-addNote(tabDebug, "Если «чисел найдено» = 0 при открытых клетках — числа читаются не так, скинь дамп.", 34)
+addNote(tabDebug, "Палитра снимается со свежей доски. Если метки врут — жми пересборку ДО первого клика по доске.", 34)
 
 switchTab("Mines")
 refreshHint()
@@ -1968,7 +1750,7 @@ local function tick(t)
     local rebuild = false
     if folder ~= Board.folder then
         rebuild = true
-        Board.coverColor = nil
+        Board.palette, Board.matPalette = nil, nil
     elseif folder and #folder:GetChildren() ~= Board.lastCount then
         rebuild = true
     elseif not gridValid() then
@@ -2049,8 +1831,8 @@ local function tick(t)
         hint = ("  |  лучший ход: %.0f%%"):format(bestRisk * 100)
     end
 
-    statusbar.Text = ("Доска %dx%d  |  мины: %d  |  безопасно: %d  |  ?%d  |  режим: %s%s")
-        :format(Board.w, Board.h, mines, safe, unknown, Board.truthMode, hint)
+    statusbar.Text = ("Доска %dx%d  |  закрыто: %d  |  числа: %d  |  мины: %d  |  ?%d%s")
+        :format(Board.w, Board.h, #Board.covered, #Board.numbers, mines, unknown, hint)
 end
 
 task.spawn(function()
@@ -2109,18 +1891,10 @@ function VMS.destroy()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     conns = {}
 
+    pcall(clearBoost)
     pcall(clearAllMarkers)
     pcall(clearAllPaint)
     pcall(function() if markerFolder then markerFolder:Destroy() end end)
-
-    local char = LocalPlayer.Character
-    if char then
-        pcall(clearKorblox, char)
-        for _, d in ipairs(char:GetDescendants()) do
-            if d:IsA("BasePart") or d:IsA("Decal") then pcall(setHidden, d, false) end
-        end
-    end
-    pcall(function() if cosFolder then cosFolder:Destroy() end end)
 
     pcall(function()
         for part, o in pairs(flagOrig) do
@@ -2148,6 +1922,5 @@ end
 --====================== 11. СТАРТ ====================================
 applyFOV()
 refreshHint()
-enforceCos()
-notify("Venice Hub 3.4 · Home = меню · G = догадки")
-print("[Venice Hub 3.4] загружен. Home — меню, G — догадки, H — метки, J — rage.")
+notify("Venice Hub 3.5 · Home = меню · G = догадки")
+print("[Venice Hub 3.5] загружен. Home — меню, G — догадки, H — метки, J — rage.")
