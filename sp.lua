@@ -1,5 +1,5 @@
 --[[=====================================================================
-      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.3
+      V E N I C E   H U B   |   bLockerman's Minesweeper   v3.4
       ------------------------------------------------------------------
       Меню     : Home   (все клавиши меняются: НАСТРОЙКИ -> КЛАВИШИ)
       Хоткеи   : G = догадки вкл/выкл, H = метки вкл/выкл, J = rage
@@ -30,7 +30,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local VMS = { version = "3.3" }
+local VMS = { version = "3.4" }
 _G.__VENICE_MS = VMS
 
 local alive = true
@@ -50,11 +50,12 @@ local CFG = {
     markers      = true,
     markerGuess  = true,
     markerBest   = true,
+    markerExact  = false,   -- только точные выводы, без вероятностей
     paintTiles   = false,
     heatmap      = true,
-    markerSize   = 0.9,
+    markerSize   = 1.2,
     markerTrans  = 0.1,
-    markerHeight = 1.8,
+    markerHeight = 0.6,
     autoFlag     = false,
     autoReveal   = false,
     density      = 0.16,
@@ -72,6 +73,9 @@ local CFG = {
     keyRage      = Enum.KeyCode.J,
     uiTrans      = 0,
 }
+
+local lastSig = -1
+local mineSet, safeSet, riskSet, bestGuess, bestRisk = {}, {}, {}, nil, 1
 
 --====================== 2. ТЕМА И ХЕЛПЕРЫ ============================
 local THEME = {
@@ -120,8 +124,6 @@ local Board = {
 local PAINTS = {
     mine  = Color3.fromRGB(255, 45, 45),
     safe  = Color3.fromRGB(0, 255, 110),
-    gmine = Color3.fromRGB(255, 150, 40),
-    gsafe = Color3.fromRGB(80, 165, 255),
     best  = Color3.fromRGB(0, 255, 255),
 }
 
@@ -193,10 +195,33 @@ local function nearest(list, v)
     return best
 end
 
+--=== ЧТЕНИЕ ЧИСЛА (устойчивое) =======================================
 local function numberAt(part)
     local gui = part:FindFirstChild("NumberGui")
-    local lbl = gui and gui:FindFirstChild("TextLabel")
-    return lbl and tonumber(lbl.Text) or nil
+    if gui then
+        local lbl = gui:FindFirstChild("TextLabel", true)
+        local n = lbl and tonumber(lbl.Text)
+        if n then return n end
+        for _, d in ipairs(gui:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local v = tonumber(d.Text)
+                if v then return v end
+            end
+        end
+    end
+    for _, d in ipairs(part:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local v = tonumber(d.Text)
+            if v then return v end
+        end
+    end
+    for k, v in pairs(part:GetAttributes()) do
+        local lk = string.lower(k)
+        if type(v) == "number" and v >= 0 and v <= 8 and v % 1 == 0 then
+            if lk:find("num") or lk:find("count") or lk:find("adj") or lk == "value" then return v end
+        end
+    end
+    return nil
 end
 
 local function probeTruth(part)
@@ -204,17 +229,24 @@ local function probeTruth(part)
         local lk = string.lower(k)
         if type(v) == "boolean" then
             if lk:find("mine") or lk:find("bomb") then return v and "mine" or "safe" end
-            if lk:find("safe") then return v and "safe" or "mine" end
+            if lk:find("safe") or lk:find("empty") then return v and "safe" or "mine" end
         end
     end
     for _, ch in ipairs(part:GetChildren()) do
         if ch:IsA("BoolValue") then
             local n = string.lower(ch.Name)
             if n:find("mine") or n:find("bomb") then return ch.Value and "mine" or "safe" end
-            if n:find("safe") then return ch.Value and "safe" or "mine" end
+            if n:find("safe") or n:find("empty") then return ch.Value and "safe" or "mine" end
         end
     end
     return nil
+end
+
+local function hasFlag(part)
+    for _, ch in ipairs(part:GetChildren()) do
+        if ch:IsA("Model") or string.lower(ch.Name):find("flag") then return true end
+    end
+    return false
 end
 
 local function isGreen(col)
@@ -235,21 +267,22 @@ local function buildGrid(folder)
     end
     if #parts < 4 then Board.cells, Board.w, Board.h = {}, 0, 0; return end
 
-    do
+    -- цвет закрытой клетки считается ОДИН раз на доску и фиксируется
+    if not Board.coverColor then
         local counts, sample = {}, {}
         for i = 1, #parts do
             local p = parts[i]
-            if not numberAt(p) and not p:FindFirstChildOfClass("Model") then
-                local key = ("%d_%d_%d"):format(math.floor(p.Color.R * 8), math.floor(p.Color.G * 8), math.floor(p.Color.B * 8))
+            if not numberAt(p) and not hasFlag(p) then
+                local key = ("%d_%d_%d"):format(math.floor(p.Color.R * 16), math.floor(p.Color.G * 16), math.floor(p.Color.B * 16))
                 counts[key] = (counts[key] or 0) + 1
                 sample[key] = p.Color
             end
         end
-        local bk, bn
+        local bk, bn = nil, 0
         for k, n in pairs(counts) do
-            if not bn or n > bn then bk, bn = k, n end
+            if n > bn then bk, bn = k, n end
         end
-        Board.coverColor = bk and sample[bk] or nil
+        if bk and bn >= 3 then Board.coverColor = sample[bk] end
     end
 
     local xs, zs, sumY = {}, {}, 0
@@ -353,8 +386,8 @@ local function setMarker(cell, kind)
     if not colorClose(m.Color, col) then m.Color = col end
 
     local scale = 1
-    if cell.markerGuess then scale = 0.8 end
-    if kind == "best" then scale = 1.25 end
+    if cell.markerGuess then scale = 0.75 end
+    if kind == "best" then scale = 1.3 end
     local size = CFG.markerSize * scale
     if math.abs(m.Size.X - size) > 0.01 then m.Size = Vector3.new(size, size, size) end
 
@@ -406,7 +439,7 @@ local function setPaint(cell, kind)
     if not cell.origColor then
         cell.origColor, cell.origMaterial, cell.origTrans = part.Color, part.Material, part.Transparency
     end
-    part.Color = PAINTS[kind] or PAINTS.gsafe
+    part.Color = PAINTS[kind] or PAINTS.safe
     part.Material = Enum.Material.Neon
     part.Transparency = CFG.markerTrans
     cell.painted, cell.applied = kind, part.Color
@@ -439,13 +472,15 @@ local function refresh()
                 Board.numbers[#Board.numbers + 1] = c
             else
                 c.number = nil
-                if part:FindFirstChildOfClass("Model") then
+                if hasFlag(part) then
                     c.state = "flagged"
                 elseif c.painted then
                     c.state = "unknown"
-                elseif isCoveredColor(part.Color) then
+                elseif Board.coverColor and colorClose(part.Color, Board.coverColor, 0.09) then
                     c.state = "unknown"
-                elseif c.truth == "mine" then
+                elseif isGreen(part.Color) then
+                    c.state = "unknown"
+                elseif not Board.coverColor and c.truth == "mine" then
                     c.state = "unknown"
                 else
                     c.state = "blank"
@@ -459,7 +494,7 @@ local function refresh()
     Board.truthMode = truthHits > 0 and "атрибуты" or "логика"
 end
 
---=== РЕШАТЕЛЬ: точный перебор фронта с вероятностями =================
+--=== РЕШАТЕЛЬ ========================================================
 local SOLVE_CAP = 4096
 local SOLVE_MAX_COMP = 26
 
@@ -578,8 +613,8 @@ local function solveBoard()
     local covered = Board.covered
     for i = 1, #covered do
         local c = covered[i]
-        if c.state == "flagged" or c.painted == "mine" or c.truth == "mine" then mine[c] = true end
-        if c.painted == "safe" or c.truth == "safe" then safe[c] = true end
+        if c.state == "flagged" or c.painted == "mine" then mine[c] = true end
+        if c.painted == "safe" then safe[c] = true end
     end
 
     local cons
@@ -693,9 +728,10 @@ local function solveBoard()
         if not tw2 or tw2 <= 0 then outsideUnknown += 1 end
     end
 
-    local pOutside = 1
+    local pOutside = CFG.density
     if outsideUnknown > 0 then
-        pOutside = math.clamp((remaining - frontierExp) / outsideUnknown, 0, 1)
+        local raw = (remaining - frontierExp) / outsideUnknown
+        pOutside = math.clamp(raw, 0.02, 0.98)
     end
 
     for i = 1, #unknownList do
@@ -738,6 +774,8 @@ end
 
 local function signature()
     local h = 7
+    local folder = Board.folder
+    h = (h * 131 + (folder and folder:GetFullName():len() or 0)) % 2147483647
     local cells = Board.cells
     for i = 1, #cells do
         local c = cells[i]
@@ -755,7 +793,7 @@ local function autoFlag(mine)
     if os.clock() - lastFlag < 0.06 then return end
     for c in pairs(mine) do
         local part = c.part
-        if part and part.Parent and not part:FindFirstChildOfClass("Model") then
+        if part and part.Parent and not hasFlag(part) then
             local cd = part:FindFirstChildOfClass("ClickDetector")
             if cd then
                 local ok = pcall(fireclickdetector, cd)
@@ -791,7 +829,7 @@ local function autoReveal(safe)
     end
 end
 
---====================== 4. КОСМЕТИКА (korblox / headless) ============
+--====================== 4. КОСМЕТИКА ================================
 local COS_MESH = "rbxassetid://101851696"
 local COS_TEX  = "rbxassetid://101851254"
 local HIDE_ATTR = "VeniceOrigT"
@@ -799,6 +837,7 @@ local HIDE_ATTR = "VeniceOrigT"
 local hidingNow = false
 local hooked = setmetatable({}, { __mode = "k" })
 local cosFolder, meshCache
+local building, lastBuildTry = false, 0
 
 local function getCosFolder()
     if cosFolder and cosFolder.Parent then return cosFolder end
@@ -915,7 +954,8 @@ local function findKorbloxPart(char)
     if not cosFolder or not cosFolder.Parent then return nil end
     for _, p in ipairs(cosFolder:GetChildren()) do
         if p:IsA("BasePart") and p.Name == "VeniceKorbloxLeg" then
-            local w = p:FindFirstChildWhichIsA("WeldConstraint")
+            local w = p:FindFirstChildWhichIsA("Weld")
+                or p:FindFirstChildWhichIsA("WeldConstraint")
             if w and w.Part1 and w.Part1:IsDescendantOf(char) then return p end
         end
     end
@@ -923,9 +963,12 @@ local function findKorbloxPart(char)
 end
 
 local function clearKorblox(char)
+    if cosFolder then
+        for _, p in ipairs(cosFolder:GetChildren()) do
+            if p.Name == "VeniceKorbloxLeg" then pcall(function() p:Destroy() end) end
+        end
+    end
     if not char then return end
-    local p = findKorbloxPart(char)
-    if p then pcall(function() p:Destroy() end) end
     local upper, lower, foot = findLegParts(char)
     setHidden(upper, false)
     setHidden(lower, false)
@@ -944,25 +987,45 @@ local function getMeshPart()
     return nil
 end
 
-local function buildKorbloxLeg(char, upper, lower, foot)
-    local top = upper.CFrame * CFrame.new(0, upper.Size.Y / 2, 0)
+local function hipOf(upper)
+    return upper.CFrame * CFrame.new(0, upper.Size.Y / 2, 0)
+end
+
+-- строим ногу АСИНХРОННО: меш грузится с yield, CFrame считается ПОСЛЕ загрузки
+local function buildKorbloxLeg(char)
+    if building then return end
+    if not char or not char.Parent then return end
+    if findKorbloxPart(char) then return end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    local upper, lower, foot = findLegParts(char)
+    if not upper then return end
+
+    building = true
+    local part = getMeshPart()
+
+    if not char.Parent or not upper.Parent or findKorbloxPart(char) then
+        building = false
+        return
+    end
+
+    -- пересчёт уже после yield, по актуальной позе
+    local top = hipOf(upper)
     local bottom
     if foot and foot:IsA("BasePart") then
         bottom = foot.CFrame * CFrame.new(0, -foot.Size.Y / 2, 0)
     elseif lower and lower:IsA("BasePart") then
         bottom = lower.CFrame * CFrame.new(0, -lower.Size.Y / 2, 0)
     else
-        bottom = upper.CFrame * CFrame.new(0, -upper.Size.Y, 0)
+        bottom = top * CFrame.new(0, -(upper.Size.Y + 1), 0)
     end
 
-    local a, b = top.Position, bottom.Position
-    local delta = a - b
-    local len = math.clamp(delta.Magnitude, 0.5, 9)
-    local up = delta.Magnitude > 1e-3 and delta.Unit or Vector3.new(0, 1, 0)
-    local mid = (a + b) / 2
-    local w = math.clamp(math.max(upper.Size.X, upper.Size.Z) * 1.05, 0.3, 1.2)
+    local delta = top.Position - bottom.Position
+    local len = math.clamp(delta.Magnitude, 0.6, 12)
+    local mid = (top.Position + bottom.Position) / 2
+    local w = math.clamp(math.max(upper.Size.X, upper.Size.Z) * 1.05, 0.25, 1.4)
 
-    local part = getMeshPart()
     if part then
         pcall(function()
             part.TextureID = COS_TEX
@@ -976,10 +1039,15 @@ local function buildKorbloxLeg(char, upper, lower, foot)
         sm.MeshType = Enum.MeshType.FileMesh
         sm.MeshId = COS_MESH
         sm.TextureId = COS_TEX
+        sm.Scale = Vector3.new(w, len / 2, w)
     end
 
+    -- ориентация берётся у бедра: меш идёт вдоль ноги, следует анимации
+    local rot = upper.CFrame - upper.CFrame.Position
+    local target = CFrame.new(mid) * rot
+
     part.Size = Vector3.new(w, len, w)
-    part.CFrame = CFrame.lookAt(mid, mid + upper.CFrame.RightVector, up)
+    part.CFrame = target
     part.Anchored = false
     part.CanCollide = false
     part.CanQuery = false
@@ -990,32 +1058,48 @@ local function buildKorbloxLeg(char, upper, lower, foot)
     part.BottomSurface = Enum.SurfaceType.Smooth
     part.Parent = getCosFolder()
 
-    local weld = Instance.new("WeldConstraint")
-    weld.Part0 = part
-    weld.Part1 = upper
+    -- Weld с C0 в локальных координатах бедра: жёстко, без дрейфа
+    local weld = Instance.new("Weld")
+    weld.Part0 = upper
+    weld.Part1 = part
+    weld.C0 = upper.CFrame:ToObjectSpace(target)
+    weld.C1 = CFrame.new()
     weld.Parent = part
 
     setHidden(upper, true)
     setHidden(lower, true)
     setHidden(foot, true)
+
+    building = false
 end
 
-local function applyKorblox(char, on)
-    if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    if not on then clearKorblox(char) return end
-    if findKorbloxPart(char) then return end
-    local upper, lower, foot = findLegParts(char)
-    if not upper then return end
-    buildKorbloxLeg(char, upper, lower, foot)
+local function korbloxValid(char)
+    local p = findKorbloxPart(char)
+    if not p then return false end
+    local upper = findLegParts(char)
+    if not upper then return false end
+    local topNow = (p.CFrame * CFrame.new(0, p.Size.Y / 2, 0)).Position
+    return (topNow - hipOf(upper).Position).Magnitude < 1.6
 end
 
 local function enforceCos()
     local char = LocalPlayer.Character
     if not char then return end
     if CFG.cosHeadless then pcall(applyHeadless, char, true) end
-    if CFG.cosKorblox then pcall(applyKorblox, char, true) end
+    if CFG.cosKorblox and not building then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            if not korbloxValid(char) then
+                local now = os.clock()
+                if now - lastBuildTry > 0.4 then
+                    lastBuildTry = now
+                    local p = findKorbloxPart(char)
+                    if p then pcall(function() p:Destroy() end) end
+                    task.spawn(function() pcall(buildKorbloxLeg, char) end)
+                end
+            end
+        end
+    end
 end
 
 local cosAcc = 0
@@ -1032,8 +1116,13 @@ end))
 local function watchChar(char)
     if not char then return end
     meshCache = nil
-    enforceCos()
-    for _, d in ipairs({ 0.2, 0.6, 1.2 }) do task.delay(d, enforceCos) end
+    building, lastBuildTry = false, 0
+    if cosFolder then
+        for _, p in ipairs(cosFolder:GetChildren()) do
+            if p.Name == "VeniceKorbloxLeg" then pcall(function() p:Destroy() end) end
+        end
+    end
+    for _, d in ipairs({ 0.3, 0.8, 1.5 }) do task.delay(d, enforceCos) end
     bind(char.DescendantAdded:Connect(function(d)
         if d:IsA("BasePart") then hookPart(d) end
         task.defer(enforceCos)
@@ -1042,7 +1131,15 @@ end
 
 if LocalPlayer.Character then watchChar(LocalPlayer.Character) end
 bind(LocalPlayer.CharacterAdded:Connect(watchChar))
-bind(LocalPlayer.CharacterAppearanceLoaded:Connect(enforceCos))
+bind(LocalPlayer.CharacterRemoving:Connect(function(char) pcall(clearKorblox, char) end))
+bind(LocalPlayer.CharacterAppearanceLoaded:Connect(function(char)
+    task.delay(0.1, function()
+        building = false
+        local p = findKorbloxPart(char)
+        if p then pcall(function() p:Destroy() end) end
+        enforceCos()
+    end)
+end))
 
 --====================== 5. ВИЗУАЛЫ ===================================
 local savedFOV = Camera and Camera.FieldOfView or 70
@@ -1199,15 +1296,18 @@ local function applySkins(t)
     for i = 1, #cells do
         local part = cells[i].part
         if part and part.Parent then
-            local model = part:FindFirstChildOfClass("Model")
-            if model then
-                for _, p in ipairs(model:GetDescendants()) do
-                    if p:IsA("BasePart") then
-                        if not flagOrig[p] then
-                            flagOrig[p] = { Color = p.Color, Material = p.Material,
-                                            Transparency = p.Transparency, Reflectance = p.Reflectance }
+            for _, ch in ipairs(part:GetChildren()) do
+                local model = ch:IsA("Model") and ch or (ch:IsA("BasePart") and ch or nil)
+                if model then
+                    local list = model:IsA("Model") and model:GetDescendants() or { model }
+                    for _, p in ipairs(list) do
+                        if p:IsA("BasePart") then
+                            if not flagOrig[p] then
+                                flagOrig[p] = { Color = p.Color, Material = p.Material,
+                                                Transparency = p.Transparency, Reflectance = p.Reflectance }
+                            end
+                            fn(p, t)
                         end
-                        fn(p, t)
                     end
                 end
             end
@@ -1723,13 +1823,14 @@ addSection(tabMines, "МЕТКИ НА КЛЕТКАХ")
 addToggle(tabMines, "Показывать мины (метки)", "showMines", function(v)
     if not v then clearAllMarkers(); clearAllPaint() end
 end)
+addToggle(tabMines, "Только точные (без вероятностей)", "markerExact")
 addToggle(tabMines, "Помечать догадки (полупрозрачно)", "markerGuess")
 addToggle(tabMines, "Метка лучшего хода", "markerBest")
-addSlider(tabMines, "Размер меток", "markerSize", 0.3, 2.0, 2)
+addSlider(tabMines, "Размер меток", "markerSize", 0.3, 2.5, 2)
 addSlider(tabMines, "Прозрачность меток", "markerTrans", 0, 0.9, 2)
-addSlider(tabMines, "Высота меток", "markerHeight", 0.4, 5.0, 1)
+addSlider(tabMines, "Высота меток", "markerHeight", 0.1, 5.0, 1)
 addButton(tabMines, "Убрать метки", function() clearAllMarkers(); clearAllPaint() end)
-addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ = безопасно, ЦИАН = лучший ход с наименьшим риском. Плотные — точный вывод, полупрозрачные — вероятность. При 50/50 бот подскажет клетку с минимальным риском.", 46)
+addNote(tabMines, "КРАСНАЯ точка = мина, СИНЯЯ = безопасно, ЦИАН = лучший ход с наименьшим риском. Метки ставятся ТОЛЬКО на закрытые клетки. Плотные — точный вывод, полупрозрачные — вероятность.", 46)
 
 addSection(tabMines, "ДОПОЛНИТЕЛЬНО")
 addToggle(tabMines, "Тепловая карта (риск по всей доске)", "heatmap")
@@ -1761,6 +1862,7 @@ addSection(tabSkin, "ПЕРСОНАЖ")
 addToggle(tabSkin, "Korblox (нога)", "cosKorblox", function(v)
     local char = LocalPlayer.Character
     if v then
+        building, lastBuildTry = false, 0
         enforceCos()
     elseif char then
         pcall(clearKorblox, char)
@@ -1784,10 +1886,9 @@ addToggle(tabSkin, "Жёсткая фиксация", "cosForce")
 addButton(tabSkin, "Применить заново", function()
     CFG.cosKorblox, CFG.cosHeadless = true, true
     syncUI()
+    building, lastBuildTry = false, 0
     local char = LocalPlayer.Character
-    if char then
-        pcall(clearKorblox, char)
-    end
+    if char then pcall(clearKorblox, char) end
     enforceCos()
     notify("Скин применён")
 end, THEME.accent)
@@ -1800,7 +1901,7 @@ addButton(tabSkin, "Снять всё", function()
         for _, p in ipairs(headParts(char)) do setHidden(p, false) end
     end
 end)
-addNote(tabSkin, "Korblox и Headless держатся на местном персонаже и переживают респавн. Headless скрывает голову и шляпы.", 34)
+addNote(tabSkin, "Нога приваривается к бедру в локальных координатах и следует за анимацией. При отрыве пересобирается автоматически, сносится при смерти.", 34)
 
 addSection(tabSet, "КЛАВИШИ")
 addKeybind(tabSet, "Меню", "keybind", refreshHint)
@@ -1825,15 +1926,16 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     local folder = Board.folder
     print("===== VENICE HUB DEBUG =====")
     print("Доска:", folder and folder:GetFullName() or "НЕ НАЙДЕНА")
-    print("Цвет закрытой клетки (авто):", tostring(Board.coverColor))
-    print("Клеток в сетке:", #Board.cells, "| сетка:", Board.w .. "x" .. Board.h)
+    print("Цвет закрытой клетки (фикс):", tostring(Board.coverColor))
+    print("Клеток:", #Board.cells, "| сетка:", Board.w .. "x" .. Board.h)
+    print("Закрытых:", #Board.covered, "| чисел найдено:", #Board.numbers)
     print("Меток на карте:", #markerFolder:GetChildren())
     if folder then
         local kids = folder:GetChildren()
         for i = 1, math.min(3, #kids) do
             local p = kids[i]
-            print(("-- %s [%s] Color=%s BrickColor=%s"):format(p:GetFullName(), p.ClassName,
-                tostring(p.Color), p.BrickColor.Name))
+            print(("-- %s [%s] Color=%s BrickColor=%s num=%s"):format(p:GetFullName(), p.ClassName,
+                tostring(p.Color), p.BrickColor.Name, tostring(numberAt(p))))
             for _, ch in ipairs(p:GetChildren()) do
                 print("   child:", ch.ClassName, ch.Name,
                     ch:IsA("ValueBase") and tostring(ch.Value) or "")
@@ -1849,22 +1951,24 @@ addButton(tabDebug, "Дамп структуры в консоль (F9)", functi
     for _, o in ipairs(Workspace:GetChildren()) do print("WS:", o.ClassName, o.Name) end
     print("===== END DEBUG =====")
 end)
-addButton(tabDebug, "Пересобрать доску", function() Board.lastCount = -1 end)
-addNote(tabDebug, "Если меток на карте заметно больше, чем клеток — нажми «Убрать метки» и сообщи.", 34)
+addButton(tabDebug, "Пересобрать доску", function()
+    Board.lastCount = -1
+    Board.coverColor = nil
+    lastSig = -1
+end)
+addNote(tabDebug, "Если «чисел найдено» = 0 при открытых клетках — числа читаются не так, скинь дамп.", 34)
 
 switchTab("Mines")
 refreshHint()
 
 --====================== 8. ЦИКЛ ======================================
-local lastSig = -1
-local mineSet, safeSet, riskSet, bestGuess, bestRisk = {}, {}, {}, nil, 1
-
 local function tick(t)
     local folder = findBoard()
 
     local rebuild = false
     if folder ~= Board.folder then
         rebuild = true
+        Board.coverColor = nil
     elseif folder and #folder:GetChildren() ~= Board.lastCount then
         rebuild = true
     elseif not gridValid() then
@@ -1877,6 +1981,7 @@ local function tick(t)
         Board.folder = folder
         Board.lastCount = folder and #folder:GetChildren() or -1
         lastSig = -1
+        mineSet, safeSet, riskSet, bestGuess, bestRisk = {}, {}, {}, nil, 1
         if folder then buildGrid(folder) end
     end
 
@@ -1893,26 +1998,34 @@ local function tick(t)
         mineSet, safeSet, riskSet, bestGuess, bestRisk = solveBoard()
     end
 
+    local haveInfo = #Board.numbers > 0 or next(mineSet) ~= nil
+
     for i = 1, #Board.cells do
         local c = Board.cells[i]
+        local covered = (c.state == "unknown" or c.state == "flagged")
         local kind, guess
 
-        if mineSet[c] then
-            kind = "mine"
-        elseif safeSet[c] then
-            kind = "safe"
-        elseif CFG.heatmap and CFG.markerGuess and riskSet[c] then
-            kind = (riskSet[c] >= 0.5) and "mine" or "safe"
-            guess = true
+        if covered and haveInfo then
+            if mineSet[c] then
+                kind = "mine"
+            elseif safeSet[c] then
+                kind = "safe"
+            elseif CFG.heatmap and CFG.markerGuess and riskSet[c] then
+                kind = (riskSet[c] >= 0.5) and "mine" or "safe"
+                guess = true
+            end
+            if guess and CFG.markerExact then kind = nil end
         end
 
-        c.markerGuess = guess and true or false
+        c.markerGuess = guess == true
 
         setMarker(c, (CFG.showMines and CFG.markers) and kind or nil)
-        setPaint(c, (CFG.showMines and CFG.paintTiles) and kind or nil)
+        setPaint(c, (CFG.showMines and CFG.paintTiles and kind) and kind or nil)
     end
 
-    if CFG.showMines and CFG.markers and CFG.markerBest and bestGuess and bestGuess.part and (bestRisk or 1) > 0.001 then
+    if CFG.showMines and CFG.markers and CFG.markerBest and bestGuess and bestGuess.part
+        and (bestGuess.state == "unknown" or bestGuess.state == "flagged")
+        and (bestRisk or 1) > 0.001 then
         bestGuess.markerGuess = false
         setMarker(bestGuess, "best")
     end
@@ -2036,5 +2149,5 @@ end
 applyFOV()
 refreshHint()
 enforceCos()
-notify("Venice Hub 3.3 · Home = меню · G = догадки")
-print("[Venice Hub 3.3] загружен. Home — меню, G — догадки, H — метки, J — rage.")
+notify("Venice Hub 3.4 · Home = меню · G = догадки")
+print("[Venice Hub 3.4] загружен. Home — меню, G — догадки, H — метки, J — rage.")
